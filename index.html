@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FieldGrade</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --bg:#fff; --fg:#1d2329; --mut:#66707a; --line:#d9dee3; --acc:#1f6feb; --cut:#d1453b; --fill:#2f6fd6; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; font:14px/1.4 system-ui,sans-serif; color:var(--fg); background:var(--bg); }
+  #app { display:flex; height:100%; }
+  #map { flex:1; }
+  #panel { width:320px; overflow:auto; border-left:1px solid var(--line); padding:12px 14px; }
+  h1 { font-size:18px; margin:0 0 4px; } h2 { font-size:14px; margin:16px 0 6px; }
+  .mut { color:var(--mut); font-size:12px; }
+  button { font:inherit; padding:6px 10px; border:1px solid var(--line); background:#f6f8fa; border-radius:6px; cursor:pointer; }
+  button.on { background:var(--acc); color:#fff; border-color:var(--acc); }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:6px 0; }
+  input[type=number] { width:76px; font:inherit; padding:4px; }
+  table { width:100%; border-collapse:collapse; } td { padding:3px 0; } td:last-child { text-align:right; font-variant-numeric:tabular-nums; }
+  .cut { color:var(--cut); font-weight:600; } .fill { color:var(--fill); font-weight:600; }
+  #hover { position:absolute; z-index:1000; left:10px; bottom:22px; background:#fffe; padding:4px 8px; border-radius:4px; font-variant-numeric:tabular-nums; }
+  #status { min-height:18px; }
+  canvas#prof { width:100%; height:160px; border:1px solid var(--line); border-radius:4px; }
+  @media (max-width:700px) { #app { flex-direction:column; } #map { min-height:55vh; } #panel { width:100%; border-left:0; border-top:1px solid var(--line); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="map"></div>
+  <div id="panel">
+    <h1>FieldGrade</h1>
+    <div class="mut">USGS 3DEP lidar (bare earth). Estimates only — verify before bidding or moving dirt.</div>
+    <div class="row"><input id="q" placeholder="lat, lon" style="flex:1;padding:4px"><button id="go">Go</button></div>
+
+    <h2>Tools</h2>
+    <div class="row">
+      <button id="bProf">Elevation profile</button>
+      <button id="bField">Field area</button>
+      <button id="bClear">Clear</button>
+    </div>
+    <div class="mut" id="hint">Click points on the map; double-click (or Done) to finish.</div>
+    <div class="row"><button id="bDone" disabled>Done</button><button id="bUndo" disabled>Undo</button></div>
+    <div id="status" class="mut"></div>
+
+    <div id="profBox" hidden>
+      <h2>Profile</h2>
+      <canvas id="prof" width="600" height="300"></canvas>
+      <table id="profStats"></table>
+      <div class="row"><button id="profCsv">Save CSV</button></div>
+    </div>
+
+    <div id="fieldBox" hidden>
+      <h2>Design plane</h2>
+      <div class="row"><label><input type="radio" name="mode" value="fit" checked> Best fit</label>
+        <label><input type="radio" name="mode" value="manual"> Set slope</label></div>
+      <div class="row">Slope % <input id="slope" type="number" step="0.01" value="0.10">
+        Fall to ° <input id="heading" type="number" step="1" value="180"></div>
+      <div class="row">Cut : fill <input id="ratio" type="number" step="0.05" value="1.00" min="0.5" max="2">
+        <button id="recalc">Recalculate</button></div>
+      <table id="fieldStats"></table>
+      <div class="row"><button id="exCsv">Existing CSV</button><button id="deCsv">Design CSV</button></div>
+      <div class="mut">Red = cut, blue = fill. Heading is the direction water runs, clockwise from north.</div>
+    </div>
+  </div>
+</div>
+<div id="hover">Move over the map for elevation</div>
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
