@@ -1,1 +1,18 @@
-{"type":"module"}
+{
+  "type": "module",
+  "devDependencies": {
+    "axe-core": "^4.14.0",
+    "geotiff": "^2.1.3",
+    "html-validate": "^8.29.0"
+  },
+  "name": "fieldgrade",
+  "private": true,
+  "scripts": {
+    "test": "node --test earthwork.test.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "test:live": "node tests/live-check.mjs",
+    "lint": "html-validate index.html",
+    "start": "python3 -m http.server 8000",
+    "check": "npm test && npm run lint && npm run test:e2e"
+  }
+}

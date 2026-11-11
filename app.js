@@ -1,203 +1,466 @@
-import { fromArrayBuffer } from 'https://cdn.jsdelivr.net/npm/geotiff@2.1.3/+esm';
 import { toLocal, pointInPolygon, polygonArea, fitPlane, planeFromSlope, slopeOf, designZ, volumes, balance,
-  M_TO_FT, M3_TO_YD3, M2_TO_AC } from './earthwork.js';
+  profileStats, quantile, hillshade, rampColor, toCSV, parseLatLon, M_TO_FT, M3_TO_YD3, M2_TO_AC } from './earthwork.js';
+import { fetchDEM, sample, pointElevation, geocode } from './dem.js';
 
-const SVC = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer';
-const $ = (id) => document.getElementById(id);
 const L = window.L;
+const $ = (id) => document.getElementById(id);
+const ft = (m, d = 2) => (m * M_TO_FT).toFixed(d);
+const fmt = (n) => Math.round(n).toLocaleString('en-US');
+const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+const dirName = (deg) => COMPASS[Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem('fg:' + k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem('fg:' + k, JSON.stringify(v)); } catch { /* private mode */ } },
+};
 
-const map = L.map('map', { doubleClickZoom: false }).setView([35.0, -90.2], 15);
-L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-  { maxZoom: 20, maxNativeZoom: 19, attribution: 'Imagery © Esri · Elevation: USGS 3DEP' }).addTo(map);
+// ---------------- map ----------------
+const view = store.get('view');
+const map = L.map('map', { doubleClickZoom: false, zoomControl: true, preferCanvas: false })
+  .setView(view ? [view.lat, view.lng] : [39.5, -96], view ? view.z : 5);
+const imagery = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 20, maxNativeZoom: 19, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics · Elevation: USGS 3DEP' }).addTo(map);
+const labels = L.layerGroup([
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20, maxNativeZoom: 19 }),
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', { maxZoom: 20, maxNativeZoom: 19 }),
+]);
+if (store.get('labels') !== false) labels.addTo(map);
+L.control.layers({ Satellite: imagery }, { 'Roads & places': labels }, { position: 'topright' }).addTo(map);
+L.control.scale({ imperial: true, metric: false }).addTo(map);
+map.on('overlayadd overlayremove', (e) => e.layer === labels && store.set('labels', e.type === 'overlayadd'));
+map.on('moveend', () => { const c = map.getCenter(); store.set('view', { lat: c.lat, lng: c.lng, z: map.getZoom() }); });
 
-// ---------- elevation data ----------
-async function fetchDEM(bounds) {
-  const s = bounds.getSouth(), n = bounds.getNorth(), w = bounds.getWest(), e = bounds.getEast();
-  const lat0 = (s + n) / 2;
-  const wm = toLocal(lat0, e, lat0, w).x, hm = toLocal(n, w, s, w).y;
-  const scale = Math.max(1, Math.max(wm, hm) / 1500); // ~1 m cells, max 1500 px a side
-  const W = Math.max(8, Math.round(wm / scale)), H = Math.max(8, Math.round(hm / scale));
-  const url = `${SVC}/exportImage?bbox=${w},${s},${e},${n}&bboxSR=4326&imageSR=4326&size=${W},${H}` +
-    `&format=tiff&pixelType=F32&noDataInterpretation=esriNoDataMatchAny&interpolation=RSP_BilinearInterpolation&f=image`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`USGS returned ${r.status}`);
-  const tif = await fromArrayBuffer(await r.arrayBuffer());
-  const img = await tif.getImage();
-  const [data] = await img.readRasters();
-  return { data, W: img.getWidth(), H: img.getHeight(), s, n, w, e };
+// ---------------- status / busy ----------------
+let busy = 0;
+function status(msg, err = false) { $('status').textContent = msg || ''; $('status').classList.toggle('err', !!err); }
+async function withBusy(fn) {
+  busy++; $('progress').hidden = false;
+  try { return await fn(); }
+  catch (e) { if (e.name !== 'AbortError') { status(e.message || String(e), true); console.error(e); } }
+  finally { if (--busy === 0) $('progress').hidden = true; }
 }
-const valid = (z) => Number.isFinite(z) && z > -500 && z < 9000;
 
-function sample(dem, lat, lon) {
-  const px = ((lon - dem.w) / (dem.e - dem.w)) * dem.W - 0.5, py = ((dem.n - lat) / (dem.n - dem.s)) * dem.H - 0.5;
-  const x0 = Math.max(0, Math.min(dem.W - 2, Math.floor(px))), y0 = Math.max(0, Math.min(dem.H - 2, Math.floor(py)));
-  const fx = Math.min(1, Math.max(0, px - x0)), fy = Math.min(1, Math.max(0, py - y0));
-  const g = (x, y) => dem.data[y * dem.W + x];
-  const v = [g(x0, y0), g(x0 + 1, y0), g(x0, y0 + 1), g(x0 + 1, y0 + 1)];
-  if (!v.every(valid)) return NaN;
-  return v[0] * (1 - fx) * (1 - fy) + v[1] * fx * (1 - fy) + v[2] * (1 - fx) * fy + v[3] * fx * fy;
-}
-
-// ---------- hover elevation ----------
-let hoverT, hoverSeq = 0;
-map.on('mousemove', (ev) => {
-  clearTimeout(hoverT);
-  hoverT = setTimeout(async () => {
-    const seq = ++hoverSeq, { lat, lng } = ev.latlng;
-    const geom = encodeURIComponent(JSON.stringify({ x: lng, y: lat, spatialReference: { wkid: 4326 } }));
-    const url = `${SVC}/identify?geometry=${geom}&geometryType=esriGeometryPoint&returnGeometry=false&returnCatalogItems=false&f=json`;
-    try {
-      const j = await (await fetch(url)).json();
-      if (seq !== hoverSeq) return;
-      const z = parseFloat(j.value);
-      $('hover').textContent = `${lat.toFixed(6)}, ${lng.toFixed(6)} · ` + (valid(z) ? `${(z * M_TO_FT).toFixed(2)} ft` : 'no data');
-    } catch { /* ignore */ }
-  }, 150);
+// ---------------- search / locate ----------------
+$('search').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const q = $('q').value.trim(); if (!q) return;
+  const ll = parseLatLon(q);
+  if (ll) { map.setView([ll.lat, ll.lon], 17, { animate: false }); status(''); return; }
+  withBusy(async () => {
+    status('Searching…');
+    const r = await geocode(q);
+    if (!r) { status(`No US match for “${q}”.`, true); return; }
+    if (r.extent) map.fitBounds([[r.extent.ymin, r.extent.xmin], [r.extent.ymax, r.extent.xmax]], { maxZoom: 17, animate: false });
+    else map.setView([r.lat, r.lon], 16, { animate: false });
+    status(r.label);
+  });
 });
+$('locate').onclick = () => {
+  if (!navigator.geolocation) { status('Location is not available in this browser.', true); return; }
+  status('Finding your location…');
+  navigator.geolocation.getCurrentPosition(
+    (p) => { map.setView([p.coords.latitude, p.coords.longitude], 17, { animate: false }); status(''); },
+    () => status('Could not get your location.', true), { enableHighAccuracy: true, timeout: 15000 });
+};
 
-// ---------- drawing ----------
-let mode = null, pts = [], temp = null, layers = L.layerGroup().addTo(map), overlay = null;
-function setMode(m) {
-  mode = m; pts = [];
-  $('bProf').classList.toggle('on', m === 'profile'); $('bField').classList.toggle('on', m === 'field');
-  $('bDone').disabled = !m; $('bUndo').disabled = !m;
-  map.getContainer().style.cursor = m ? 'crosshair' : '';
-  $('hint').textContent = m === 'profile' ? 'Click along the line; double-click or Done to finish.'
-    : m === 'field' ? 'Click the field corners; double-click or Done to finish.' : 'Pick a tool.';
-  redraw();
+// ---------------- lidar relief layer ----------------
+let relief = null, reliefCtl = null, reliefT;
+const RELIEF_MIN_ZOOM = 13;
+function reliefWanted() { return $('relief').checked; }
+$('relief').onchange = () => {
+  $('reliefOpts').hidden = !reliefWanted(); store.set('relief', reliefWanted());
+  if (reliefWanted()) loadRelief(); else { clearRelief(); renderLegend(); }
+};
+$('reliefOpacity').oninput = () => relief?.layer.setOpacity(+$('reliefOpacity').value);
+map.on('moveend', () => { if (reliefWanted()) { clearTimeout(reliefT); reliefT = setTimeout(loadRelief, 600); } });
+function clearRelief() { reliefCtl?.abort(); if (relief) map.removeLayer(relief.layer); relief = null; }
+function loadRelief() {
+  if (map.getZoom() < RELIEF_MIN_ZOOM) { clearRelief(); renderLegend(); status('Zoom in closer to see lidar relief.'); return; }
+  const b = map.getBounds();
+  if (relief && relief.bounds.contains(b)) return;
+  reliefCtl?.abort(); reliefCtl = new AbortController();
+  const ctl = reliefCtl, pb = b.pad(0.15);
+  withBusy(async () => {
+    const dem = await fetchDEM({ s: pb.getSouth(), n: pb.getNorth(), w: pb.getWest(), e: pb.getEast() },
+      { signal: ctl.signal, onProgress: (m) => status(m) });
+    if (ctl.signal.aborted) return;
+    if (dem.coverage < 0.01) { status('No lidar coverage here.', true); return; }
+    const url = renderRelief(dem);
+    if (relief) map.removeLayer(relief.layer);
+    const layer = L.imageOverlay(url, [[dem.s, dem.w], [dem.n, dem.e]], { opacity: +$('reliefOpacity').value, className: 'relief' }).addTo(map);
+    layer.bringToBack(); imagery.bringToBack();
+    relief = { layer, dem, bounds: L.latLngBounds([[dem.s, dem.w], [dem.n, dem.e]]) };
+    status(dem.coverage < 0.95 ? `Lidar covers ${Math.round(dem.coverage * 100)}% of this view.` : '');
+    renderLegend();
+  });
 }
-function redraw() {
-  if (temp) map.removeLayer(temp);
-  temp = !pts.length ? null : mode === 'field' && pts.length > 2
-    ? L.polygon(pts, { color: '#ffd400', weight: 2, fillOpacity: 0.1 }).addTo(map)
-    : L.polyline(pts, { color: '#ffd400', weight: 3 }).addTo(map);
+function renderRelief(dem) {
+  const vals = []; for (let i = 0; i < dem.data.length; i += 7) if (Number.isFinite(dem.data[i])) vals.push(dem.data[i]);
+  const lo = quantile(vals, 0.02), hi = quantile(vals, 0.98), span = Math.max(0.3, hi - lo);
+  const hs = hillshade(dem.data, dem.W, dem.H, dem.dx, dem.dy, { exaggeration: 3 });
+  const c = document.createElement('canvas'); c.width = dem.W; c.height = dem.H;
+  const g = c.getContext('2d'), im = g.createImageData(dem.W, dem.H);
+  for (let i = 0; i < dem.data.length; i++) {
+    const z = dem.data[i]; if (!Number.isFinite(z)) continue;
+    const [r, gg, b] = rampColor((z - lo) / span), s = 0.35 + 0.75 * hs[i];
+    im.data[i * 4] = Math.min(255, r * s); im.data[i * 4 + 1] = Math.min(255, gg * s); im.data[i * 4 + 2] = Math.min(255, b * s); im.data[i * 4 + 3] = 255;
+  }
+  g.putImageData(im, 0, 0);
+  dem.range = { lo, hi };
+  return c.toDataURL();
 }
-map.on('click', (e) => { if (mode) { pts.push(e.latlng); redraw(); } });
-map.on('dblclick', () => { if (mode) finish(); });
-$('bProf').onclick = () => setMode(mode === 'profile' ? null : 'profile');
-$('bField').onclick = () => setMode(mode === 'field' ? null : 'field');
-$('bUndo').onclick = () => { pts.pop(); redraw(); };
-$('bDone').onclick = () => finish();
-$('bClear').onclick = () => { layers.clearLayers(); if (overlay) map.removeLayer(overlay); overlay = null; field = null;
-  $('profBox').hidden = $('fieldBox').hidden = true; setMode(null); status(''); };
-$('go').onclick = () => { const m = $('q').value.split(/[ ,]+/).map(Number); if (m.length >= 2 && m.every(Number.isFinite)) map.setView([m[0], m[1]], 17); };
-const status = (t) => { $('status').textContent = t; };
 
-async function finish() {
-  // A double-click also fires two clicks; drop a duplicate last point.
-  const dedup = pts.filter((p, i) => i === 0 || map.distance(p, pts[i - 1]) > 0.5);
-  const m = mode; setMode(null);
-  if (temp) { map.removeLayer(temp); temp = null; }
-  try {
-    if (m === 'profile' && dedup.length >= 2) await doProfile(dedup);
-    else if (m === 'field' && dedup.length >= 3) await doField(dedup);
-    else status('Not enough points.');
-  } catch (err) { status('Error: ' + err.message); console.error(err); }
+// ---------------- legend ----------------
+function renderLegend() {
+  const parts = [];
+  if (relief?.dem.range) {
+    const stops = [0, .25, .5, .75, 1].map((t) => `rgb(${rampColor(t)}) ${t * 100}%`).join(',');
+    parts.push(`<div><b>Elevation, ft</b><div class="bar" style="background:linear-gradient(90deg,${stops})"></div>
+      <div class="ends"><span>${ft(relief.dem.range.lo, 1)}</span><span>${ft(relief.dem.range.hi, 1)}</span></div></div>`);
+  }
+  if (field?.lim) {
+    parts.push(`<div${parts.length ? ' style="margin-top:8px"' : ''}><b>Cut / fill, ft</b><div class="bar" style="background:linear-gradient(90deg,var(--fill),#ffffff00 50%,var(--cut))"></div>
+      <div class="ends"><span>${ft(field.lim, 2)} fill</span><span>0</span><span>${ft(field.lim, 2)} cut</span></div></div>`);
+  }
+  $('legend').innerHTML = parts.join(''); $('legend').hidden = !parts.length;
 }
 
-// ---------- profile ----------
-let profRows = [];
-async function doProfile(line) {
-  status('Loading lidar…');
-  const dem = await fetchDEM(L.latLngBounds(line).pad(0.05));
-  layers.addLayer(L.polyline(line, { color: '#ffd400', weight: 3 }));
-  profRows = []; let dist = 0;
-  for (let i = 1; i < line.length; i++) {
-    const a = line[i - 1], b = line[i], seg = map.distance(a, b), n = Math.max(1, Math.ceil(seg));
-    for (let k = i === 1 ? 0 : 1; k <= n; k++) {
-      const t = k / n, lat = a.lat + (b.lat - a.lat) * t, lon = a.lng + (b.lng - a.lng) * t;
-      profRows.push({ d: dist + seg * t, lat, lon, z: sample(dem, lat, lon) });
+// ---------------- hover elevation ----------------
+let hoverT, hoverCtl;
+const demsForHover = () => [field?.dem, profile?.dem, relief?.dem].filter(Boolean);
+map.on('mousemove', (ev) => showElevation(ev.latlng));
+// Touch screens have no hover: a tap (when not drawing) shows the elevation there.
+map.on('click', (ev) => { if (!draw.mode) showElevation(ev.latlng); });
+function showElevation(ll) {
+  const { lat, lng } = ll, at = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+  for (const d of demsForHover()) {
+    const z = sample(d, lat, lng);
+    if (Number.isFinite(z)) { $('hover').textContent = `${at} · ${ft(z)} ft`; return; }
+  }
+  $('hover').textContent = `${at} · …`;
+  clearTimeout(hoverT); hoverCtl?.abort();
+  hoverT = setTimeout(async () => {
+    const ctl = hoverCtl = new AbortController();
+    try {
+      const z = await pointElevation(lat, lng, { signal: ctl.signal });
+      if (!ctl.signal.aborted) $('hover').textContent = `${at} · ${Number.isFinite(z) ? ft(z) + ' ft' : 'no lidar'}`;
+    } catch { if (!ctl.signal.aborted) $('hover').textContent = `${at} · elevation unavailable`; }
+  }, 250);
+}
+map.on('mouseout', () => { clearTimeout(hoverT); hoverCtl?.abort(); });
+
+// ---------------- drawing ----------------
+const draw = { mode: null, pts: [], line: null, ghost: null, markers: [] };
+const TOOL = { profile: { btn: 'bProf', title: 'Elevation profile', hint: 'Click along the line.', min: 2 },
+  field: { btn: 'bField', title: 'Field outline', hint: 'Click each corner of the field.', min: 3 } };
+function startDraw(mode) {
+  cancelDraw();
+  draw.mode = mode; draw.pts = [];
+  $(TOOL[mode].btn).setAttribute('aria-pressed', 'true');
+  $('dbTitle').textContent = TOOL[mode].title; $('dbHint').textContent = TOOL[mode].hint;
+  $('drawbar').hidden = false; map.getContainer().style.cursor = 'crosshair';
+  updateDraw();
+}
+function cancelDraw() {
+  if (!draw.mode) return;
+  $(TOOL[draw.mode].btn).setAttribute('aria-pressed', 'false');
+  for (const l of [draw.line, draw.ghost, ...draw.markers]) if (l) map.removeLayer(l);
+  Object.assign(draw, { mode: null, pts: [], line: null, ghost: null, markers: [] });
+  $('drawbar').hidden = true; map.getContainer().style.cursor = '';
+}
+function pathLength(pts) { let d = 0; for (let i = 1; i < pts.length; i++) d += map.distance(pts[i - 1], pts[i]); return d; }
+function areaOf(pts) {
+  const lat0 = pts[0].lat, lon0 = pts[0].lng;
+  return polygonArea(pts.map((p) => { const q = toLocal(p.lat, p.lng, lat0, lon0); return [q.x, q.y]; }));
+}
+function measureText(mode, pts) {
+  if (mode === 'profile') return pts.length > 1 ? `${pts.length} points · ${fmt(pathLength(pts) * M_TO_FT)} ft` : `${pts.length} point${pts.length === 1 ? '' : 's'}`;
+  return pts.length > 2 ? `${pts.length} corners · ${(areaOf(pts) * M2_TO_AC).toFixed(2)} ac` : `${pts.length} corner${pts.length === 1 ? '' : 's'}`;
+}
+function updateDraw(cursor) {
+  const { mode, pts } = draw; if (!mode) return;
+  const shown = cursor ? [...pts, cursor] : pts;
+  if (draw.line) map.removeLayer(draw.line);
+  draw.line = mode === 'field' && shown.length > 2
+    ? L.polygon(shown, { color: '#ffd400', weight: 2, fillOpacity: 0.12, dashArray: cursor ? '6 6' : null, interactive: false }).addTo(map)
+    : shown.length > 1 ? L.polyline(shown, { color: '#ffd400', weight: 3, interactive: false }).addTo(map) : null;
+  draw.markers.forEach((m) => map.removeLayer(m));
+  draw.markers = pts.map((p) => L.circleMarker(p, { radius: 5, color: '#1c2420', weight: 2, fillColor: '#fff', fillOpacity: 1, interactive: false }).addTo(map));
+  $('dbMeasure').textContent = measureText(mode, shown);
+  $('bUndo').disabled = !pts.length; $('bDone').disabled = pts.length < TOOL[mode].min;
+}
+map.on('click', (e) => { if (draw.mode) { draw.pts.push(e.latlng); updateDraw(); } });
+map.on('mousemove', (e) => { if (draw.mode && draw.pts.length) updateDraw(e.latlng); });
+map.on('dblclick', (e) => { if (draw.mode) { L.DomEvent.stop(e); finishDraw(); } });
+$('bProf').onclick = () => (draw.mode === 'profile' ? cancelDraw() : startDraw('profile'));
+$('bField').onclick = () => (draw.mode === 'field' ? cancelDraw() : startDraw('field'));
+$('bUndo').onclick = () => { draw.pts.pop(); updateDraw(); };
+$('bCancel').onclick = cancelDraw;
+$('bDone').onclick = finishDraw;
+document.addEventListener('keydown', (e) => {
+  if (e.target.closest('input, textarea, select')) return;
+  if (e.key === 'Escape') cancelDraw();
+  else if (e.key === 'Enter' && draw.mode) { e.preventDefault(); finishDraw(); }
+  else if ((e.key === 'Backspace' || (e.key === 'z' && (e.ctrlKey || e.metaKey))) && draw.mode) { e.preventDefault(); draw.pts.pop(); updateDraw(); }
+  else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'p') startDraw('profile');
+  else if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'f') startDraw('field');
+});
+function finishDraw() {
+  if (!draw.mode) return;
+  // A double-click adds two clicks at the same spot; drop near-duplicates.
+  const pts = draw.pts.filter((p, i) => i === 0 || map.distance(p, draw.pts[i - 1]) > 0.5);
+  const mode = draw.mode;
+  if (pts.length < TOOL[mode].min) { status(mode === 'field' ? 'A field needs at least 3 corners.' : 'A profile needs at least 2 points.', true); return; }
+  cancelDraw();
+  if (mode === 'profile') setProfile(pts); else setField(pts);
+}
+
+// Editable shape with draggable vertex handles.
+function editable(pts, isPoly, onChange) {
+  const shape = (isPoly ? L.polygon(pts, { color: '#ffd400', weight: 2.5, fill: false })
+    : L.polyline(pts, { color: '#ffd400', weight: 3.5 })).addTo(map);
+  const icon = L.divIcon({ className: 'vtx', iconSize: [14, 14] });
+  const handles = pts.map((p, i) => {
+    const m = L.marker(p, { draggable: true, icon, keyboard: true, title: `Point ${i + 1}: drag to move` }).addTo(map);
+    m.on('drag', () => { pts[i] = m.getLatLng(); shape.setLatLngs(pts); });
+    m.on('dragend', () => onChange(pts.slice()));
+    return m;
+  });
+  return { shape, remove() { map.removeLayer(shape); handles.forEach((h) => map.removeLayer(h)); } };
+}
+
+// ---------------- profile ----------------
+let profile = null;
+function setProfile(pts) {
+  profile?.edit.remove(); profile?.cursor && map.removeLayer(profile.cursor);
+  profile = { pts, edit: editable(pts.slice(), false, (p) => { profile.pts = p; computeProfile(); }), rows: [], dem: null, cursor: null };
+  store.set('profile', pts.map((p) => [p.lat, p.lng]));
+  $('intro').hidden = true;
+  computeProfile();
+}
+let profSeq = 0;
+function computeProfile() {
+  const seq = ++profSeq, pts = profile.pts;
+  withBusy(async () => {
+    const b = L.latLngBounds(pts), pad = Math.max(0.0003, (b.getNorth() - b.getSouth()) * 0.05);
+    if (!profile.dem || !L.latLngBounds([[profile.dem.s, profile.dem.w], [profile.dem.n, profile.dem.e]]).contains(b)) {
+      profile.dem = await fetchDEM({ s: b.getSouth() - pad, n: b.getNorth() + pad, w: b.getWest() - pad, e: b.getEast() + pad }, { onProgress: (m) => status(m) });
     }
-    dist += seg;
+    if (seq !== profSeq) return;
+    const rows = []; let dist = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], c = pts[i], seg = map.distance(a, c), n = Math.max(1, Math.ceil(seg / Math.max(0.5, profile.dem.dx)));
+      for (let k = i === 1 ? 0 : 1; k <= n; k++) {
+        const t = k / n, lat = a.lat + (c.lat - a.lat) * t, lon = a.lng + (c.lng - a.lng) * t;
+        rows.push({ d: dist + seg * t, lat, lon, z: sample(profile.dem, lat, lon) });
+      }
+      dist += seg;
+    }
+    const st = profileStats(rows);
+    if (!st) throw new Error('No lidar coverage along this line.');
+    profile.rows = rows; profile.stats = st; profile.dist = dist;
+    drawProfile();
+    const gaps = rows.filter((r) => !Number.isFinite(r.z)).length;
+    const pct = (g) => `${(Math.abs(g) * 100).toFixed(2)}%`;
+    $('profStats').innerHTML = `
+      <dt>Length</dt><dd>${fmt(dist * M_TO_FT)} ft</dd>
+      <dt>Start → end</dt><dd>${ft(st.start)} → ${ft(st.end)} ft</dd>
+      <dt>Overall grade</dt><dd>${pct(st.grade)} ${st.grade < 0 ? 'downhill' : st.grade > 0 ? 'uphill' : 'level'} (${ft(Math.abs(st.end - st.start))} ft)</dd>
+      <dt>Low / high</dt><dd>${ft(st.lo)} / ${ft(st.hi)} ft</dd>
+      <dt>Steepest (33 ft run)</dt><dd>↑ ${pct(st.maxUp)} · ↓ ${pct(st.maxDown)}</dd>
+      <dt>Lidar cell</dt><dd>${ft(profile.dem.dx, 1)} ft</dd>` +
+      (gaps ? `<dt>No-data samples</dt><dd>${gaps}</dd>` : '');
+    $('profBox').hidden = false; status('');
+  });
+}
+function chartGeom() {
+  const c = $('prof'), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  const st = profile.stats, lo = st.lo * M_TO_FT, hi = st.hi * M_TO_FT, pad = Math.max(0.25, (hi - lo) * 0.08);
+  const L0 = 44, R0 = 10, T0 = 10, B0 = 22;
+  const X = (d) => L0 + (d / profile.dist) * (W - L0 - R0);
+  const Y = (zft) => T0 + (1 - (zft - (lo - pad)) / (hi - lo + 2 * pad)) * (H - T0 - B0);
+  return { c, dpr, W, H, X, Y, lo: lo - pad, hi: hi + pad, L0, R0, T0, B0 };
+}
+function drawProfile(cursorIdx = -1) {
+  if (!profile?.stats) return;
+  const g0 = chartGeom(), { c, dpr, W, H, X, Y } = g0, g = c.getContext('2d');
+  const css = getComputedStyle(document.documentElement), muted = css.getPropertyValue('--muted'), line = css.getPropertyValue('--line'), acc = css.getPropertyValue('--acc');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  g.font = '11px system-ui'; g.fillStyle = muted; g.strokeStyle = line; g.lineWidth = 1;
+  const step = niceStep((g0.hi - g0.lo) / 4);
+  for (let z = Math.ceil(g0.lo / step) * step; z <= g0.hi; z += step) {
+    g.beginPath(); g.moveTo(g0.L0, Y(z)); g.lineTo(W - g0.R0, Y(z)); g.stroke();
+    g.textAlign = 'right'; g.fillText(z.toFixed(step < 1 ? 1 : 0), g0.L0 - 5, Y(z) + 4);
   }
-  const ok = profRows.filter((r) => valid(r.z));
-  if (!ok.length) throw new Error('No lidar coverage on this line.');
-  drawProfile(ok, dist);
-  const zs = ok.map((r) => r.z), first = ok[0], last = ok[ok.length - 1];
-  const fall = (first.z - last.z) * M_TO_FT;
-  $('profStats').innerHTML = `<tr><td>Length</td><td>${(dist * M_TO_FT).toFixed(0)} ft</td></tr>
-    <tr><td>Start → end</td><td>${(first.z * M_TO_FT).toFixed(2)} → ${(last.z * M_TO_FT).toFixed(2)} ft</td></tr>
-    <tr><td>Low / high</td><td>${(Math.min(...zs) * M_TO_FT).toFixed(2)} / ${(Math.max(...zs) * M_TO_FT).toFixed(2)} ft</td></tr>
-    <tr><td>Overall slope</td><td>${(Math.abs(fall / (dist * M_TO_FT)) * 100).toFixed(3)} % ${fall >= 0 ? 'down' : 'up'}</td></tr>`;
-  $('profBox').hidden = false; status('');
+  g.textAlign = 'left'; g.fillText('0', g0.L0, H - 6);
+  g.textAlign = 'right'; g.fillText(`${fmt(profile.dist * M_TO_FT)} ft`, W - g0.R0, H - 6);
+  // area fill + line, broken at no-data gaps
+  const rows = profile.rows;
+  const grad = g.createLinearGradient(0, g0.T0, 0, H - g0.B0); grad.addColorStop(0, acc + '55'); grad.addColorStop(1, acc + '08');
+  let run = [];
+  const flush = () => {
+    if (run.length > 1) {
+      g.beginPath(); run.forEach((r, i) => (i ? g.lineTo : g.moveTo).call(g, X(r.d), Y(r.z * M_TO_FT)));
+      g.lineTo(X(run[run.length - 1].d), H - g0.B0); g.lineTo(X(run[0].d), H - g0.B0); g.closePath(); g.fillStyle = grad; g.fill();
+      g.beginPath(); run.forEach((r, i) => (i ? g.lineTo : g.moveTo).call(g, X(r.d), Y(r.z * M_TO_FT)));
+      g.strokeStyle = acc; g.lineWidth = 2; g.stroke();
+    }
+    run = [];
+  };
+  for (const r of rows) { if (Number.isFinite(r.z)) run.push(r); else flush(); } flush();
+  // vertex markers on the chart
+  let d = 0; g.strokeStyle = line; g.setLineDash([3, 3]);
+  for (let i = 1; i < profile.pts.length - 1; i++) { d += map.distance(profile.pts[i - 1], profile.pts[i]); g.beginPath(); g.moveTo(X(d), g0.T0); g.lineTo(X(d), H - g0.B0); g.stroke(); }
+  g.setLineDash([]);
+  if (cursorIdx >= 0 && Number.isFinite(rows[cursorIdx].z)) {
+    const r = rows[cursorIdx];
+    g.strokeStyle = muted; g.beginPath(); g.moveTo(X(r.d), g0.T0); g.lineTo(X(r.d), H - g0.B0); g.stroke();
+    g.fillStyle = '#ffd400'; g.strokeStyle = '#1c2420'; g.lineWidth = 2;
+    g.beginPath(); g.arc(X(r.d), Y(r.z * M_TO_FT), 4.5, 0, 7); g.fill(); g.stroke();
+  }
 }
-function drawProfile(rows, dist) {
-  const c = $('prof'), g = c.getContext('2d'), W = c.width, H = c.height, P = 40;
-  g.clearRect(0, 0, W, H);
-  const zs = rows.map((r) => r.z * M_TO_FT), lo = Math.min(...zs), hi = Math.max(...zs), span = Math.max(0.5, hi - lo);
-  const X = (d) => P + (d / dist) * (W - P - 10), Y = (z) => H - 24 - ((z - lo) / span) * (H - 40);
-  g.font = '18px system-ui'; g.fillStyle = '#66707a'; g.strokeStyle = '#e3e7eb';
-  for (let i = 0; i <= 4; i++) { const z = lo + (span * i) / 4; g.beginPath(); g.moveTo(P, Y(z)); g.lineTo(W, Y(z)); g.stroke(); g.fillText(z.toFixed(1), 0, Y(z) + 5); }
-  g.fillText(`${(dist * M_TO_FT).toFixed(0)} ft`, W - 80, H - 2);
-  g.strokeStyle = '#1f6feb'; g.lineWidth = 3; g.beginPath();
-  rows.forEach((r, i) => (i ? g.lineTo : g.moveTo).call(g, X(r.d), Y(r.z * M_TO_FT))); g.stroke();
+function niceStep(x) { const p = 10 ** Math.floor(Math.log10(x)), m = x / p; return (m < 1.5 ? 1 : m < 3.5 ? 2 : m < 7.5 ? 5 : 10) * p; }
+function profileCursor(clientX) {
+  if (!profile?.stats) return;
+  const { X } = chartGeom(), rect = $('prof').getBoundingClientRect(), x = clientX - rect.left;
+  let best = 0, bd = Infinity;
+  profile.rows.forEach((r, i) => { const dd = Math.abs(X(r.d) - x); if (dd < bd) { bd = dd; best = i; } });
+  const r = profile.rows[best];
+  drawProfile(best);
+  $('profTip').textContent = Number.isFinite(r.z) ? `${fmt(r.d * M_TO_FT)} ft along · ${ft(r.z)} ft elevation` : `${fmt(r.d * M_TO_FT)} ft along · no lidar`;
+  if (!profile.cursor) profile.cursor = L.circleMarker([r.lat, r.lon], { radius: 6, color: '#1c2420', weight: 2, fillColor: '#ffd400', fillOpacity: 1, interactive: false }).addTo(map);
+  else profile.cursor.setLatLng([r.lat, r.lon]);
 }
-$('profCsv').onclick = () => csv('profile.csv', ['distance_ft', 'lat', 'lon', 'elev_ft'],
-  profRows.filter((r) => valid(r.z)).map((r) => [(r.d * M_TO_FT).toFixed(2), r.lat.toFixed(7), r.lon.toFixed(7), (r.z * M_TO_FT).toFixed(3)]));
+$('prof').addEventListener('pointermove', (e) => profileCursor(e.clientX));
+$('prof').addEventListener('pointerleave', () => { drawProfile(); if (profile?.cursor) { map.removeLayer(profile.cursor); profile.cursor = null; } $('profTip').textContent = 'Point at the chart to find that spot on the map.'; });
+new ResizeObserver(() => drawProfile()).observe($('prof'));
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => drawProfile());
+$('profCsv').onclick = () => profile && download('profile.csv', toCSV(['distance_ft', 'lat', 'lon', 'elev_ft'],
+  profile.rows.filter((r) => Number.isFinite(r.z)).map((r) => [ft(r.d), r.lat.toFixed(7), r.lon.toFixed(7), ft(r.z, 3)])));
 
-// ---------- field cut/fill ----------
-let field = null;
-async function doField(poly) {
-  status('Loading lidar…');
-  const bounds = L.latLngBounds(poly), dem = await fetchDEM(bounds.pad(0.02));
-  layers.addLayer(L.polygon(poly, { color: '#ffd400', weight: 2, fill: false }));
-  const lat0 = (dem.s + dem.n) / 2, lon0 = (dem.w + dem.e) / 2;
-  const P = poly.map((p) => { const q = toLocal(p.lat, p.lng, lat0, lon0); return [q.x, q.y]; });
-  const dLat = (dem.n - dem.s) / dem.H, dLon = (dem.e - dem.w) / dem.W;
-  const cell = toLocal(lat0 + dLat, lon0 + dLon, lat0, lon0), cellArea = Math.abs(cell.x * cell.y);
-  const cells = [];
-  for (let j = 0; j < dem.H; j++) for (let i = 0; i < dem.W; i++) {
-    const z = dem.data[j * dem.W + i]; if (!valid(z)) continue;
-    const lat = dem.n - (j + 0.5) * dLat, lon = dem.w + (i + 0.5) * dLon, q = toLocal(lat, lon, lat0, lon0);
-    if (pointInPolygon(q.x, q.y, P)) cells.push({ i, j, lat, lon, x: q.x, y: q.y, z });
-  }
-  if (cells.length < 10) throw new Error('Too few lidar cells inside the field.');
-  field = { dem, cells, cellArea, area: polygonArea(P), plane: null };
-  $('fieldBox').hidden = false; compute(); status('');
+// ---------------- field cut / fill ----------------
+let field = null, overlay = null;
+function setField(pts) {
+  field?.edit.remove();
+  field = { pts, edit: editable(pts.slice(), true, (p) => { field.pts = p; loadField(); }) };
+  store.set('field', pts.map((p) => [p.lat, p.lng]));
+  $('intro').hidden = true;
+  loadField();
 }
-function compute() {
-  if (!field) return;
-  const ratio = Math.min(2, Math.max(0.5, parseFloat($('ratio').value) || 1));
+let fieldSeq = 0;
+function loadField() {
+  const seq = ++fieldSeq, poly = field.pts;
+  withBusy(async () => {
+    const b = L.latLngBounds(poly), pad = Math.max(0.0002, (b.getNorth() - b.getSouth()) * 0.02);
+    const dem = (field.dem && L.latLngBounds([[field.dem.s, field.dem.w], [field.dem.n, field.dem.e]]).contains(b)) ? field.dem
+      : await fetchDEM({ s: b.getSouth() - pad, n: b.getNorth() + pad, w: b.getWest() - pad, e: b.getEast() + pad }, { onProgress: (m) => status(m) });
+    if (seq !== fieldSeq) return;
+    const lat0 = (dem.s + dem.n) / 2, lon0 = (dem.w + dem.e) / 2;
+    const P = poly.map((p) => { const q = toLocal(p.lat, p.lng, lat0, lon0); return [q.x, q.y]; });
+    const dLat = (dem.n - dem.s) / dem.H, dLon = (dem.e - dem.w) / dem.W;
+    const cellArea = dem.dx * dem.dy;
+    const cells = []; let inside = 0;
+    for (let j = 0; j < dem.H; j++) for (let i = 0; i < dem.W; i++) {
+      const lat = dem.n - (j + 0.5) * dLat, lon = dem.w + (i + 0.5) * dLon, q = toLocal(lat, lon, lat0, lon0);
+      if (!pointInPolygon(q.x, q.y, P)) continue;
+      inside++;
+      const z = dem.data[j * dem.W + i];
+      if (Number.isFinite(z)) cells.push({ i, j, lat, lon, x: q.x, y: q.y, z });
+    }
+    if (cells.length < 10) throw new Error('Too little lidar inside this field — draw a larger area or check coverage.');
+    Object.assign(field, { dem, cells, cellArea, area: polygonArea(P), coverage: cells.length / Math.max(1, inside) });
+    $('fieldBox').hidden = false;
+    computeField(); status('');
+  });
+}
+function readNum(id, lo, hi, dflt) { const v = parseFloat($(id).value); const ok = Number.isFinite(v) && v >= lo && v <= hi; $(id).setAttribute('aria-invalid', String(!ok)); return ok ? v : dflt; }
+function computeField() {
+  if (!field?.cells) return;
   const manual = document.querySelector('input[name=mode]:checked').value === 'manual';
-  const base = manual ? planeFromSlope(parseFloat($('slope').value) || 0, parseFloat($('heading').value) || 0) : fitPlane(field.cells);
-  const plane = balance(field.cells, base, field.cellArea, ratio);
-  field.plane = plane;
-  const v = volumes(field.cells, plane, field.cellArea), s = slopeOf(plane), acres = field.area * M2_TO_AC;
-  if (!manual) { $('slope').value = s.slopePct.toFixed(3); $('heading').value = s.headingDeg.toFixed(0); }
-  const cutYd = v.cut * M3_TO_YD3, fillYd = v.fill * M3_TO_YD3;
-  $('fieldStats').innerHTML = `<tr><td>Area</td><td>${acres.toFixed(2)} ac</td></tr>
-    <tr><td>Design slope</td><td>${s.slopePct.toFixed(3)} % toward ${s.headingDeg.toFixed(0)}°</td></tr>
-    <tr><td class="cut">Cut</td><td class="cut">${Math.round(cutYd).toLocaleString()} yd³</td></tr>
-    <tr><td class="fill">Fill</td><td class="fill">${Math.round(fillYd).toLocaleString()} yd³</td></tr>
-    <tr><td>Cut per acre</td><td>${Math.round(cutYd / acres).toLocaleString()} yd³/ac</td></tr>
-    <tr><td>Max cut / fill</td><td>${(v.maxCut * M_TO_FT).toFixed(2)} / ${(v.maxFill * M_TO_FT).toFixed(2)} ft</td></tr>`;
-  drawOverlay(Math.max(v.maxCut, v.maxFill));
+  $('slope').disabled = $('heading').disabled = !manual;
+  const ratio = readNum('ratio', 0.5, 2, 1);
+  const base = manual ? planeFromSlope(readNum('slope', 0, 10, 0), readNum('heading', 0, 360, 0)) : fitPlane(field.cells);
+  const plane = field.plane = balance(field.cells, base, field.cellArea, ratio);
+  const v = volumes(field.cells, plane, field.cellArea), s = slopeOf(plane);
+  if (!manual) { $('slope').value = s.slopePct.toFixed(3); $('heading').value = Math.round(s.headingDeg) % 360; }
+  $('arrow').style.transform = `rotate(${s.headingDeg - 180}deg)`;
+  const acres = field.area * M2_TO_AC, cutYd = v.cut * M3_TO_YD3, fillYd = v.fill * M3_TO_YD3;
+  let zlo = Infinity, zhi = -Infinity;
+  for (const c of field.cells) { if (c.z < zlo) zlo = c.z; if (c.z > zhi) zhi = c.z; }
+  $('kpis').innerHTML = `
+    <div class="kpi"><span>Area</span><b>${acres.toFixed(1)}</b> ac</div>
+    <div class="kpi cut"><span>Cut</span><b>${fmt(cutYd)}</b> yd³</div>
+    <div class="kpi fill"><span>Fill</span><b>${fmt(fillYd)}</b> yd³</div>`;
+  $('fieldStats').innerHTML = `
+    <dt>Design slope</dt><dd>${s.slopePct.toFixed(3)}% toward ${dirName(s.headingDeg)} (${Math.round(s.headingDeg) % 360}°)</dd>
+    <dt>Fall across field</dt><dd>${ft(fallAcross(plane))} ft</dd>
+    <dt>Cut per acre</dt><dd>${fmt(cutYd / acres)} yd³/ac</dd>
+    <dt>Deepest cut / fill</dt><dd>${ft(v.maxCut)} / ${ft(v.maxFill)} ft</dd>
+    <dt>Existing low / high</dt><dd>${ft(zlo)} / ${ft(zhi)} ft</dd>
+    <dt>Lidar cell / points</dt><dd>${ft(field.dem.dx, 1)} ft · ${fmt(field.cells.length)}</dd>`;
+  const warn = [];
+  if (field.coverage < 0.95) warn.push(`Lidar has gaps: ${Math.round(field.coverage * 100)}% of the field has data. Volumes cover only that part.`);
+  if (acres > 0 && cutYd / acres > 1500) warn.push('Very large cut per acre. Check the outline doesn’t include ditches, roads, levees or buildings.');
+  $('fieldWarn').innerHTML = warn.join('<br>'); $('fieldWarn').hidden = !warn.length;
+  field.lim = Math.max(0.03, Math.max(v.maxCut, v.maxFill) * 0.6);
+  drawCutFill(); renderLegend();
 }
-function drawOverlay(maxD) {
-  const { dem, cells, plane } = field, c = document.createElement('canvas');
+function fallAcross(plane) {
+  let lo = Infinity, hi = -Infinity;
+  for (const c of field.cells) { const z = designZ(plane, c.x, c.y); if (z < lo) lo = z; if (z > hi) hi = z; }
+  return hi - lo;
+}
+function drawCutFill() {
+  const { dem, cells, plane, lim } = field, c = document.createElement('canvas');
   c.width = dem.W; c.height = dem.H;
-  const g = c.getContext('2d'), im = g.createImageData(dem.W, dem.H), lim = Math.max(0.03, maxD * 0.6);
+  const g = c.getContext('2d'), im = g.createImageData(dem.W, dem.H);
   for (const p of cells) {
     const d = p.z - designZ(plane, p.x, p.y), t = Math.min(1, Math.abs(d) / lim), k = (p.j * dem.W + p.i) * 4;
-    const [r, gg, b] = d > 0 ? [209, 69, 59] : [47, 111, 214];
-    im.data[k] = r; im.data[k + 1] = gg; im.data[k + 2] = b; im.data[k + 3] = Math.round(40 + 190 * t);
+    const col = d > 0 ? [200, 66, 58] : [45, 104, 196];
+    im.data[k] = col[0]; im.data[k + 1] = col[1]; im.data[k + 2] = col[2]; im.data[k + 3] = Math.round(30 + 205 * t);
   }
   g.putImageData(im, 0, 0);
   if (overlay) map.removeLayer(overlay);
-  overlay = L.imageOverlay(c.toDataURL(), [[dem.s, dem.w], [dem.n, dem.e]], { opacity: 0.75 }).addTo(map);
+  overlay = L.imageOverlay(c.toDataURL(), [[dem.s, dem.w], [dem.n, dem.e]], { opacity: 0.85 }).addTo(map);
+  field.edit.shape.bringToFront();
 }
-$('recalc').onclick = compute;
-document.querySelectorAll('input[name=mode]').forEach((r) => (r.onchange = compute));
-$('exCsv').onclick = () => field && csv('existing.csv', ['lat', 'lon', 'elev_ft'],
-  field.cells.map((p) => [p.lat.toFixed(7), p.lon.toFixed(7), (p.z * M_TO_FT).toFixed(3)]));
-$('deCsv').onclick = () => field && csv('design.csv', ['lat', 'lon', 'existing_ft', 'design_ft', 'cut_fill_ft'],
-  field.cells.map((p) => { const d = designZ(field.plane, p.x, p.y);
-    return [p.lat.toFixed(7), p.lon.toFixed(7), (p.z * M_TO_FT).toFixed(3), (d * M_TO_FT).toFixed(3), ((p.z - d) * M_TO_FT).toFixed(3)]; }));
+let fT;
+const refield = () => { clearTimeout(fT); fT = setTimeout(computeField, 200); };
+['slope', 'heading', 'ratio'].forEach((id) => $(id).addEventListener('input', refield));
+document.querySelectorAll('input[name=mode]').forEach((r) => r.addEventListener('change', computeField));
+$('exCsv').onclick = () => field?.cells && download('field-existing.csv', toCSV(['lat', 'lon', 'elev_ft'],
+  field.cells.map((p) => [p.lat.toFixed(7), p.lon.toFixed(7), ft(p.z, 3)])));
+$('deCsv').onclick = () => field?.plane && download('field-design.csv', toCSV(['lat', 'lon', 'existing_ft', 'design_ft', 'cut_fill_ft'],
+  field.cells.map((p) => { const d = designZ(field.plane, p.x, p.y); return [p.lat.toFixed(7), p.lon.toFixed(7), ft(p.z, 3), ft(d, 3), ft(p.z - d, 3)]; })));
 
-function csv(name, head, rows) {
-  const blob = new Blob([[head, ...rows].map((r) => r.join(',')).join('\n')], { type: 'text/csv' });
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+// ---------------- remove ----------------
+document.querySelectorAll('[data-clear]').forEach((b) => b.addEventListener('click', () => {
+  if (b.dataset.clear === 'profile' && profile) {
+    profSeq++; profile.edit.remove(); if (profile.cursor) map.removeLayer(profile.cursor); profile = null;
+    $('profBox').hidden = true; store.set('profile', null);
+  }
+  if (b.dataset.clear === 'field' && field) {
+    fieldSeq++; field.edit.remove(); if (overlay) map.removeLayer(overlay); overlay = null; field = null;
+    $('fieldBox').hidden = true; store.set('field', null); renderLegend();
+  }
+  $('intro').hidden = !!(profile || field);
+}));
+
+function download(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type: 'text/csv;charset=utf-8' })); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
-window.__fg = { map, finish, setMode, get field() { return field; }, get pts() { return pts; } }; // test hook
+// ---------------- restore last session ----------------
+const toLL = (a) => (Array.isArray(a) ? a.filter((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite)).map(([a1, b1]) => L.latLng(a1, b1)) : []);
+{
+  const f = toLL(store.get('field')), p = toLL(store.get('profile'));
+  if (f.length >= 3) setField(f);
+  if (p.length >= 2) setProfile(p);
+  if (store.get('relief')) { $('relief').checked = true; $('reliefOpts').hidden = false; loadRelief(); }
+}
+
+// Test hook (read-only state + programmatic drawing).
+window.__fg = { map, setField, setProfile, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };

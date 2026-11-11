@@ -84,3 +84,78 @@ export function balance(pts, plane, cellArea, ratio = 1) {
   }
   return { ...plane, a: (lo + hi) / 2 };
 }
+
+// Summary of a sampled profile [{d (m), z (m)}], ignoring gaps.
+export function profileStats(rows) {
+  const ok = rows.filter((r) => Number.isFinite(r.z));
+  if (ok.length < 2) return null;
+  let lo = Infinity, hi = -Infinity, maxUp = 0, maxDown = 0;
+  for (const r of ok) { if (r.z < lo) lo = r.z; if (r.z > hi) hi = r.z; }
+  // Steepest grade over a ~10 m window, so 1 m lidar noise doesn't dominate.
+  for (let i = 0, j = 0; i < ok.length; i++) {
+    while (j < ok.length && ok[j].d - ok[i].d < 10) j++;
+    if (j >= ok.length) break;
+    const g = (ok[j].z - ok[i].z) / (ok[j].d - ok[i].d);
+    if (g > maxUp) maxUp = g; if (-g > maxDown) maxDown = -g;
+  }
+  const first = ok[0], last = ok[ok.length - 1], run = last.d - first.d;
+  return { lo, hi, start: first.z, end: last.z, length: run, grade: run > 0 ? (last.z - first.z) / run : 0, maxUp, maxDown };
+}
+
+// Value at fraction q (0..1) of a numeric array (copy-sorted).
+export function quantile(values, q) {
+  const v = Float64Array.from(values).sort();
+  if (!v.length) return NaN;
+  const i = Math.min(v.length - 1, Math.max(0, Math.round(q * (v.length - 1))));
+  return v[i];
+}
+
+// Horn hillshade, 0..1. z: row-major heights (m), dx/dy cell size (m), NaN = no data.
+export function hillshade(z, W, H, dx, dy, { azimuth = 315, altitude = 45, exaggeration = 1 } = {}) {
+  const out = new Float32Array(W * H).fill(NaN);
+  const zen = ((90 - altitude) * Math.PI) / 180;
+  const az = ((360 - azimuth + 90) % 360) * Math.PI / 180;
+  const cz = Math.cos(zen), sz = Math.sin(zen);
+  const g = (x, y) => z[Math.min(H - 1, Math.max(0, y)) * W + Math.min(W - 1, Math.max(0, x))];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const c = z[y * W + x]; if (!Number.isFinite(c)) continue;
+    const n = (xx, yy) => { const v = g(xx, yy); return Number.isFinite(v) ? v : c; };
+    const a = n(x - 1, y - 1), b = n(x, y - 1), cc = n(x + 1, y - 1), d = n(x - 1, y), f = n(x + 1, y),
+      gg = n(x - 1, y + 1), h = n(x, y + 1), i = n(x + 1, y + 1);
+    const dzdx = (((cc + 2 * f + i) - (a + 2 * d + gg)) / (8 * dx)) * exaggeration;
+    const dzdy = (((gg + 2 * h + i) - (a + 2 * b + cc)) / (8 * dy)) * exaggeration;
+    const slope = Math.atan(Math.hypot(dzdx, dzdy));
+    let aspect = Math.atan2(dzdy, -dzdx);
+    if (aspect < 0) aspect += 2 * Math.PI;
+    out[y * W + x] = Math.max(0, cz * Math.cos(slope) + sz * Math.sin(slope) * Math.cos(az - aspect));
+  }
+  return out;
+}
+
+// Elevation colour ramp (low = green, high = brown/white), t in 0..1 -> [r,g,b].
+const RAMP = [[0, [38, 115, 77]], [0.25, [120, 170, 80]], [0.5, [230, 220, 120]], [0.75, [200, 130, 60]], [1, [245, 240, 235]]];
+export function rampColor(t) {
+  t = Math.min(1, Math.max(0, t));
+  for (let k = 1; k < RAMP.length; k++) {
+    const [t1, c1] = RAMP[k];
+    if (t <= t1) {
+      const [t0, c0] = RAMP[k - 1], u = (t - t0) / (t1 - t0);
+      return c0.map((v, i) => Math.round(v + (c1[i] - v) * u));
+    }
+  }
+  return RAMP[RAMP.length - 1][1];
+}
+
+// RFC 4180 CSV with CRLF line endings.
+export function toCSV(head, rows) {
+  const cell = (v) => { const s = String(v); return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  return [head, ...rows].map((r) => r.map(cell).join(',')).join('\r\n') + '\r\n';
+}
+
+// Parse "lat, lon" / "lat lon" (decimal degrees). Returns null if not coordinates.
+export function parseLatLon(s) {
+  const m = String(s).trim().match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  const lat = +m[1], lon = +m[2];
+  return Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
+}
