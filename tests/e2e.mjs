@@ -60,6 +60,13 @@ async function newPage(opts = {}) {
     calls++;
     if (failMode === 'always') return r.fulfill({ status: 500, body: 'down' });
     if (failMode === 'once' && calls === 1) return r.fulfill({ status: 502, body: 'bad gateway' });
+    if (u.includes('returnCatalogItems=true')) {
+      const end = surface === holey ? '20120601' : '20240301';
+      return r.fulfill({ json: { value: '1', catalogItems: { features: [
+        { attributes: { Category: 2, Best: null, MinPS: 150, EndDate: null } },
+        { attributes: { Category: 1, Best: 900, MinPS: 0, title: 'Older 1 m', StartDate: 20100101, EndDate: '20100301' } },
+        { attributes: { Category: 1, Best: 12, MinPS: 0, title: 'Test lidar', StartDate: 20231205, EndDate: end } }] } } });
+    }
     if (u.includes('/identify')) {
       const g = JSON.parse(new URL(u).searchParams.get('geometry')), p = toLocal(g.y, g.x, LAT0, LON0);
       return r.fulfill({ json: { value: String(surface(p.x, p.y)) } });
@@ -91,6 +98,10 @@ console.log('Accuracy: plane 0.2% toward 135°');
   const areaM2 = toLocal(LAT0 + DLAT, LON0 + DLON, LAT0 - DLAT, LON0 - DLON);
   check(near(acres, (areaM2.x * areaM2.y * 2 * 2) / 4046.86 / 4, 0.2) || near(acres, 48.9, 1.5), `area ${acres} ac`);
   check(cut < 5 && fill < 5, `cut ${cut} / fill ${fill} yd³ ≈ 0 on a perfect plane`);
+  await page.waitForFunction(() => /\d{4}/.test(document.querySelector('#fieldSrc')?.textContent || ''), null, { timeout: 10000 }).catch(() => {});
+  const src = await page.textContent('#fieldSrc');
+  check(src === 'Dec 2023 – Mar 2024', `lidar date picks best-ranked source (${src})`);
+  check(await page.isHidden('#fieldWarn'), 'no warnings for recent lidar on a clean plane');
   check(!page.errors.length, 'no console errors', page.errors.join(' | '));
   await page.context().close();
 }
@@ -127,6 +138,8 @@ console.log('Stability: lidar with no-data corner');
   surface = holey; const page = await newPage(); await drawField(page);
   const warn = await page.textContent('#fieldWarn');
   check(/gaps/.test(warn) && await page.isVisible('#fieldWarn'), 'coverage warning shown', warn);
+  await page.waitForFunction(() => /years old/.test(document.querySelector('#fieldWarn').textContent), null, { timeout: 10000 }).catch(() => {});
+  check(/years old/.test(await page.textContent('#fieldWarn')), 'old-lidar warning shown for 2012 data');
   check(!page.errors.length, 'no console errors', page.errors.join(' | '));
   await page.context().close();
 }
@@ -164,6 +177,12 @@ console.log('UI: draw by mouse, edit, profile chart, relief, search');
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.busy === 0, null, { timeout: 30000 });
   check(await page.isHidden('#drawbar'), 'Enter finishes and hides the bar');
+  await page.mouse.move(...at(0.5, 0.5)); await page.waitForTimeout(100);
+  check(/ft · (cut|fill) [\d.]+ ft/.test(await page.textContent('#hover')), 'hover inside field shows cut/fill depth', await page.textContent('#hover'));
+  await page.emulateMedia({ media: 'print' });
+  await page.pdf({ path: path.join(ROOT, 'tests', 'out-report.pdf'), format: 'Letter', printBackground: true });
+  check(await page.isHidden('#search'), 'print layout hides controls');
+  await page.emulateMedia({ media: 'screen' });
   check(await page.isVisible('#legend') && /Cut \/ fill/.test(await page.textContent('#legend')), 'cut/fill legend shown');
   const before = await page.evaluate(() => window.__fg.field.area);
   const h = page.locator('.vtx').nth(2), hb = await h.boundingBox();

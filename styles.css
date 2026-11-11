@@ -121,3 +121,21 @@ fieldset.design legend { font-weight: 600; padding: 0 4px; }
   .drawbar { top: 48px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.printhead { display: none; }
+@media print {
+  @page { size: letter; margin: 12mm; }
+  :root { --bg: #fff; --card: #fff; --fg: #000; --muted: #444; --line: #bbb; --shadow: none; }
+  html, body { height: auto; background: #fff; }
+  .top, .search, #drawbar, #hover, #progress, .tools, .switch, #reliefOpts, #intro, .row, .link, .leaflet-control-container .leaflet-top { display: none !important; }
+  .printhead { display: block; margin: 0 0 6px; font-weight: 600; }
+  .app { display: block; }
+  .mapwrap { height: 105mm; break-inside: avoid; border: 1px solid #999; }
+  .panel { width: auto; border: 0; padding: 8px 0 0; overflow: visible; display: block; }
+  .card { box-shadow: none; margin-bottom: 8px; padding: 10px; }
+  .stats { break-inside: avoid; }
+  fieldset.design { display: none; }
+  .card:first-child { display: none; }
+  canvas#prof { height: 150px; }
+  .legend { box-shadow: none; border: 1px solid #999; }
+}

@@ -22,14 +22,16 @@ for (const [name, lat, lon] of SITES) {
       const g = sample(dem, lat + a, lon + b), p = await pointElevation(lat + a, lon + b);
       out.push([g, p]);
     }
-    return { out, dx: dem.dx, cov: dem.coverage };
+    const { lidarSource } = await import('./dem.js');
+    const src = await lidarSource(lat, lon).catch((e) => ({ title: 'lookup failed: ' + e.message }));
+    return { out, dx: dem.dx, cov: dem.coverage, src: src && `${src.title}${src.end ? ` (${src.start?.toISOString().slice(0, 7)} – ${src.end.toISOString().slice(0, 7)})` : ''}` };
   }, [lat, lon]).catch((e) => ({ err: e.message }));
   if (r.err) { console.log(`${name}: ERROR ${r.err}`); bad++; continue; }
   const diffs = r.out.filter(([g, p]) => Number.isFinite(g) && Number.isFinite(p)).map(([g, p]) => (g - p) * 3.28084);
   const mx = Math.max(...diffs.map(Math.abs)), mean = diffs.reduce((a, b) => a + b, 0) / diffs.length;
   worst = Math.max(worst, mx);
   console.log(`${name}: cell ${(r.dx * 3.28084).toFixed(1)} ft, coverage ${(r.cov * 100).toFixed(0)}%, ` +
-    `grid − point: mean ${mean.toFixed(3)} ft, max |${mx.toFixed(3)}| ft over ${diffs.length} pts`);
+    `grid − point: mean ${mean.toFixed(3)} ft, max |${mx.toFixed(3)}| ft over ${diffs.length} pts\n    source: ${r.src}`);
 }
 console.log(`worst difference ${worst.toFixed(3)} ft${bad ? `, ${bad} site(s) failed` : ''}`);
 await browser.close(); server.close();

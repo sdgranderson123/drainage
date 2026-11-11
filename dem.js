@@ -86,3 +86,26 @@ export async function geocode(q, { signal } = {}) {
   const c = j.candidates?.[0];
   return c ? { lat: c.location.y, lon: c.location.x, label: c.address, extent: c.extent } : null;
 }
+
+// Lidar project covering a point: the best-ranked (lowest "Best") full-resolution source in the 3DEP mosaic.
+// Returns { title, start: Date, end: Date } or null. Dates are the project's collection window.
+export async function lidarSource(lat, lon, { signal } = {}) {
+  const geom = encodeURIComponent(JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }));
+  const url = `${SVC}/identify?geometry=${geom}&geometryType=esriGeometryPoint&returnGeometry=false&returnCatalogItems=true&f=json`;
+  const j = await (await robustFetch(url, { signal, timeout: 40000, tries: 2 })).json();
+  return pickSource(j.catalogItems?.features || []);
+}
+export function pickSource(features) {
+  const ymd = (v) => { const s = String(v ?? ''); return /^\d{8}$/.test(s) ? new Date(Date.UTC(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6, 8))) : null; };
+  const items = features.map((f) => f.attributes || {})
+    .filter((a) => a.Category === 1 && Number.isFinite(a.Best) && a.MinPS === 0 && ymd(a.EndDate));
+  if (!items.length) return null;
+  // Seamless 1/3 and 1 arc-second compilations outrank project lidar in "Best", but full-resolution
+  // requests are served from the 1 m / 1/9 arc-second projects where they exist (checked against the
+  // texture of returned grids), so rank by product tier first.
+  const tier = (a) => { const t = String(a.title || a.Name);
+    return /1 ?meter|one meter/i.test(t) ? 0 : /1\/9 arc/i.test(t) ? 1 : /arc.?second/i.test(t) ? 3 : 2; };
+  items.sort((a, b) => tier(a) - tier(b) || a.Best - b.Best);
+  const a = items[0];
+  return { title: a.title || a.Name, start: ymd(a.StartDate), end: ymd(a.EndDate), compilation: tier(a) === 3 };
+}

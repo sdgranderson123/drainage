@@ -16,7 +16,10 @@ Static files, no build step, no backend.
   (e.g. 1.20 for shrink). Area, cut/fill yd³, yd³/ac, deepest cut/fill, fall across the field,
   cut/fill map with legend, existing and design CSVs. Warns about lidar gaps and implausibly large cuts.
 - **Lidar relief**: colour-shaded bare-earth elevation for the current view (zoom 13+), with legend.
-- Tap/point anywhere for elevation. The last view, field and profile are restored on reload.
+- Tap/point anywhere for elevation (inside a field it also shows the cut or fill depth there).
+- **Lidar flown**: collection window of the 1 m lidar project at the field or profile, with a warning if older than 5 years.
+- **Print / PDF**: one-page report of the map and results (use the browser’s Save as PDF).
+- The last view, field and profile are restored on reload.
 
 Elevations are NAVD88, shown in feet. Estimates only — check against a survey before bidding or moving dirt.
 
@@ -28,7 +31,7 @@ Elevations are NAVD88, shown in feet. Estimates only — check against a survey 
 
     npm install
     npm run check        # unit tests + HTML validation + end-to-end suite
-    npm run test:live    # optional: compares grid samples with USGS point queries (needs network)
+    npm run test:live    # optional, needs network: grid vs. USGS point queries at 4 sites + lidar source lookup
 
 The end-to-end suite (`tests/e2e.mjs`) runs the real page in headless Chromium with the USGS service
 replaced by synthetic lidar of known shape, and checks:

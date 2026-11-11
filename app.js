@@ -1,6 +1,6 @@
 import { toLocal, pointInPolygon, polygonArea, fitPlane, planeFromSlope, slopeOf, designZ, volumes, balance,
   profileStats, quantile, hillshade, rampColor, toCSV, parseLatLon, M_TO_FT, M3_TO_YD3, M2_TO_AC } from './earthwork.js';
-import { fetchDEM, sample, pointElevation, geocode } from './dem.js';
+import { fetchDEM, sample, pointElevation, geocode, lidarSource } from './dem.js';
 
 const L = window.L;
 const $ = (id) => document.getElementById(id);
@@ -130,11 +130,18 @@ const demsForHover = () => [field?.dem, profile?.dem, relief?.dem].filter(Boolea
 map.on('mousemove', (ev) => showElevation(ev.latlng));
 // Touch screens have no hover: a tap (when not drawing) shows the elevation there.
 map.on('click', (ev) => { if (!draw.mode) showElevation(ev.latlng); });
+function cutFillAt(lat, lng, z) {
+  if (!field?.plane || !field.P) return '';
+  const q = toLocal(lat, lng, field.origin[0], field.origin[1]);
+  if (!pointInPolygon(q.x, q.y, field.P)) return '';
+  const d = z - designZ(field.plane, q.x, q.y);
+  return ` · ${d >= 0 ? 'cut' : 'fill'} ${ft(Math.abs(d))} ft`;
+}
 function showElevation(ll) {
   const { lat, lng } = ll, at = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
   for (const d of demsForHover()) {
     const z = sample(d, lat, lng);
-    if (Number.isFinite(z)) { $('hover').textContent = `${at} · ${ft(z)} ft`; return; }
+    if (Number.isFinite(z)) { $('hover').textContent = `${at} · ${ft(z)} ft${cutFillAt(lat, lng, z)}`; return; }
   }
   $('hover').textContent = `${at} · …`;
   clearTimeout(hoverT); hoverCtl?.abort();
@@ -147,6 +154,30 @@ function showElevation(ll) {
   }, 250);
 }
 map.on('mouseout', () => { clearTimeout(hoverT); hoverCtl?.abort(); });
+
+// ---------------- lidar date ----------------
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const monthYear = (d) => `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+const srcCache = new Map();
+// Fills `el` with the lidar collection window for a point; returns the source (or null).
+async function showSource(lat, lon, el, warnEl) {
+  const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+  el.textContent = 'checking…';
+  try {
+    if (!srcCache.has(key)) srcCache.set(key, lidarSource(lat, lon).catch((e) => { srcCache.delete(key); throw e; }));
+    const s = await srcCache.get(key);
+    if (!el.isConnected) return null;
+    if (!s) { el.textContent = 'unknown'; return null; }
+    const span = s.start && monthYear(s.start) !== monthYear(s.end) ? `${monthYear(s.start)} – ${monthYear(s.end)}` : monthYear(s.end);
+    el.textContent = s.compilation ? `${span} (10 m compilation)` : span; el.title = s.title;
+    const years = (Date.now() - s.end.getTime()) / 3.156e10;
+    if (warnEl && years > 5) {
+      warnEl.hidden = false;
+      warnEl.insertAdjacentHTML('beforeend', `${warnEl.innerHTML ? '<br>' : ''}Lidar is about ${Math.floor(years)} years old. If the ground has been worked since, these numbers will be off.`);
+    }
+    return s;
+  } catch { if (el.isConnected) el.textContent = 'unavailable'; return null; }
+}
 
 // ---------------- drawing ----------------
 const draw = { mode: null, pts: [], line: null, ghost: null, markers: [] };
@@ -267,8 +298,11 @@ function computeProfile() {
       <dt>Overall grade</dt><dd>${pct(st.grade)} ${st.grade < 0 ? 'downhill' : st.grade > 0 ? 'uphill' : 'level'} (${ft(Math.abs(st.end - st.start))} ft)</dd>
       <dt>Low / high</dt><dd>${ft(st.lo)} / ${ft(st.hi)} ft</dd>
       <dt>Steepest (33 ft run)</dt><dd>↑ ${pct(st.maxUp)} · ↓ ${pct(st.maxDown)}</dd>
-      <dt>Lidar cell</dt><dd>${ft(profile.dem.dx, 1)} ft</dd>` +
+      <dt>Lidar cell</dt><dd>${ft(profile.dem.dx, 1)} ft</dd>
+      <dt>Lidar flown</dt><dd id="profSrc"></dd>` +
       (gaps ? `<dt>No-data samples</dt><dd>${gaps}</dd>` : '');
+    const mid = pts[Math.floor(pts.length / 2)];
+    showSource(mid.lat, mid.lng, $('profSrc'));
     $('profBox').hidden = false; status('');
   });
 }
@@ -368,7 +402,7 @@ function loadField() {
       if (Number.isFinite(z)) cells.push({ i, j, lat, lon, x: q.x, y: q.y, z });
     }
     if (cells.length < 10) throw new Error('Too little lidar inside this field — draw a larger area or check coverage.');
-    Object.assign(field, { dem, cells, cellArea, area: polygonArea(P), coverage: cells.length / Math.max(1, inside) });
+    Object.assign(field, { dem, cells, cellArea, P, origin: [lat0, lon0], area: polygonArea(P), coverage: cells.length / Math.max(1, inside) });
     $('fieldBox').hidden = false;
     computeField(); status('');
   });
@@ -397,11 +431,14 @@ function computeField() {
     <dt>Cut per acre</dt><dd>${fmt(cutYd / acres)} yd³/ac</dd>
     <dt>Deepest cut / fill</dt><dd>${ft(v.maxCut)} / ${ft(v.maxFill)} ft</dd>
     <dt>Existing low / high</dt><dd>${ft(zlo)} / ${ft(zhi)} ft</dd>
-    <dt>Lidar cell / points</dt><dd>${ft(field.dem.dx, 1)} ft · ${fmt(field.cells.length)}</dd>`;
+    <dt>Lidar cell / points</dt><dd>${ft(field.dem.dx, 1)} ft · ${fmt(field.cells.length)}</dd>
+    <dt>Lidar flown</dt><dd id="fieldSrc"></dd>`;
   const warn = [];
   if (field.coverage < 0.95) warn.push(`Lidar has gaps: ${Math.round(field.coverage * 100)}% of the field has data. Volumes cover only that part.`);
   if (acres > 0 && cutYd / acres > 1500) warn.push('Very large cut per acre. Check the outline doesn’t include ditches, roads, levees or buildings.');
   $('fieldWarn').innerHTML = warn.join('<br>'); $('fieldWarn').hidden = !warn.length;
+  const c0 = field.cells[Math.floor(field.cells.length / 2)];
+  showSource(c0.lat, c0.lon, $('fieldSrc'), $('fieldWarn'));
   field.lim = Math.max(0.03, Math.max(v.maxCut, v.maxFill) * 0.6);
   drawCutFill(); renderLegend();
 }
@@ -428,6 +465,13 @@ let fT;
 const refield = () => { clearTimeout(fT); fT = setTimeout(computeField, 200); };
 ['slope', 'heading', 'ratio'].forEach((id) => $(id).addEventListener('input', refield));
 document.querySelectorAll('input[name=mode]').forEach((r) => r.addEventListener('change', computeField));
+addEventListener('beforeprint', () => map.invalidateSize());
+addEventListener('afterprint', () => map.invalidateSize());
+$('printBtn').onclick = () => {
+  $('printDate').textContent = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+  if (field) map.fitBounds(field.edit.shape.getBounds(), { padding: [30, 30], animate: false });
+  setTimeout(() => window.print(), 400);
+};
 $('exCsv').onclick = () => field?.cells && download('field-existing.csv', toCSV(['lat', 'lon', 'elev_ft'],
   field.cells.map((p) => [p.lat.toFixed(7), p.lon.toFixed(7), ft(p.z, 3)])));
 $('deCsv').onclick = () => field?.plane && download('field-design.csv', toCSV(['lat', 'lon', 'existing_ft', 'design_ft', 'cut_fill_ft'],
