@@ -72,8 +72,9 @@ export function d8(f, W, H, dx = 1, dy = 1) {
 }
 
 // Upstream cell count (including itself) via topological order of the receiver graph.
-export function accumulate(rec, n) {
-  const indeg = new Int32Array(n), acc = new Float64Array(n).fill(1), q = new Int32Array(n);
+// Optional `weight` (per-cell, e.g. a field mask) counts only that cell's contribution.
+export function accumulate(rec, n, weight = null) {
+  const indeg = new Int32Array(n), acc = weight ? Float64Array.from(weight) : new Float64Array(n).fill(1), q = new Int32Array(n);
   for (let i = 0; i < n; i++) if (rec[i] >= 0) indeg[rec[i]]++;
   let h = 0, t = 0;
   for (let i = 0; i < n; i++) if (!indeg[i]) q[t++] = i;

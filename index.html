@@ -37,6 +37,11 @@
         <button type="button" class="btn primary" id="bDone">Finish</button>
       </div>
     </div>
+    <div id="mapmsg" class="mapmsg" hidden role="status" aria-live="polite">
+      <span class="spin" aria-hidden="true"></span><span id="mapmsgText"></span>
+      <button type="button" class="btn" id="mapmsgRetry" hidden>Retry</button>
+      <button type="button" class="link" id="mapmsgClose" aria-label="Dismiss message">✕</button>
+    </div>
     <div id="hover" class="hover" aria-live="off">Point at or tap the map for elevation</div>
     <div id="legend" class="legend" hidden></div>
   </div>
@@ -107,6 +112,31 @@
       </div>
     </section>
 
+    <section class="card" id="sdBox" hidden>
+      <div class="cardhead"><h2>Site design</h2></div>
+      <div class="row tight">
+        <label class="switch"><input type="checkbox" id="showFlow" checked> <span>Drainage paths</span></label>
+        <div class="seg" role="radiogroup" aria-label="Surface for drainage paths">
+          <label><input type="radio" name="surf" value="existing"><span>Existing</span></label>
+          <label><input type="radio" name="surf" value="design" checked><span>With changes</span></label>
+        </div>
+      </div>
+      <p class="small muted">Blue: water from the field. Orange: where it goes after leaving. Circles show the share of the field draining off at each spot.</p>
+      <div class="addbtns">
+        <button type="button" class="btn" id="bPond" aria-pressed="false">+ Pond</button>
+        <button type="button" class="btn" id="bGrade" aria-pressed="false">+ Raise / lower area</button>
+        <button type="button" class="btn" id="bWhole">Whole field</button>
+        <button type="button" class="btn" id="bTile" aria-pressed="false">+ Drain tile</button>
+      </div>
+      <ul id="editList" class="edits"></ul>
+      <dl id="sdStats" class="stats"></dl>
+      <h3 class="sub">Wetlands</h3>
+      <p id="wetResult" class="small"></p>
+      <label class="switch"><input type="checkbox" id="showWet" checked> <span>Show mapped wetlands (USFWS NWI)</span></label>
+      <p class="small muted">NWI maps are for screening. They are not a jurisdictional wetland delineation.</p>
+      <div class="row"><button type="button" class="btn primary" id="sdStorm">Storm 3D with changes</button></div>
+    </section>
+
     <section class="card" id="shedBox" hidden>
       <div class="cardhead"><h2>Drainage area</h2><button type="button" class="link" data-clear="shed">Remove</button></div>
       <div class="kpis" id="shedKpis"></div>
@@ -148,7 +178,7 @@
       <div class="grid2">
         <label>24-h rain, in<input id="stDepth" type="number" min="0.5" max="20" step="0.1" value="5"></label>
         <label>Curve number<input id="stCN" type="number" min="30" max="98" step="1" value="78"></label>
-        <label>Speed<select id="stSpeed"><option value="900">15 min / s</option><option value="1800" selected>30 min / s</option><option value="3600">1 h / s</option></select></label>
+        <label>Speed<select id="stSpeed"><option value="900">15 min / s</option><option value="1800">30 min / s</option><option value="3600" selected>1 h / s</option><option value="7200">2 h / s</option></select></label>
         <label>Vertical ×<input id="stExag" type="range" min="1" max="30" step="1" value="8"></label>
         <label class="span2">Surface roughness (Manning n)<select id="stN">
           <option value="0.03">0.03 – bare soil, smooth channel</option>
@@ -162,7 +192,7 @@
       <p class="small muted legendline"><span class="sw rain"></span>Rain intensity <span class="sw flow"></span>Outflow</p>
       <dl id="stStats" class="stats"></dl>
       <p class="small muted">NRCS Type II 24-hour storm, curve-number losses, 2D overland flow with Manning friction on the lidar surface.
-        Screening visual only: no culverts, tile or channels, and coarse cells. Use HEC-RAS 2D or similar for design.</p>
+        Drain tile (purple) is a sink limited to the pipe's full-flow capacity. Screening visual only: no culverts or channel shapes, and coarse cells. Use HEC-RAS 2D or similar for design.</p>
     </div>
   </div>
 </div>

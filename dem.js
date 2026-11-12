@@ -7,7 +7,7 @@ export const MAX_PX = 1500;            // max grid size per side
 export const valid = (z) => Number.isFinite(z) && z > -500 && z < 9000;
 
 // fetch with timeout + retry on network errors and 429/5xx (USGS often returns 502/504 under load).
-export async function robustFetch(url, { signal, timeout = 45000, tries = 3 } = {}) {
+export async function robustFetch(url, { signal, timeout = 45000, tries = 3, name = 'USGS elevation service' } = {}) {
   let last;
   for (let k = 0; k < tries; k++) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -21,41 +21,59 @@ export async function robustFetch(url, { signal, timeout = 45000, tries = 3 } = 
       if (r.status !== 429 && r.status < 500) throw last;
     } catch (e) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      last = e.name === 'AbortError' ? new Error('Elevation service timed out') : e;
+      last = e.name === 'AbortError' ? new Error(`The ${name} timed out. It is often slow; try again in a minute.`)
+        : e instanceof TypeError ? new Error(`Could not reach the ${name} (it is busy or down). Try again in a minute.`) : e;
       if (/error 4\d\d/.test(last.message) && !/429/.test(last.message)) throw last;
     } finally { clearTimeout(t); signal?.removeEventListener('abort', onAbort); }
-    await new Promise((res) => setTimeout(res, 800 * 2 ** k));
+    await new Promise((res) => setTimeout(res, 1000 * 2 ** k + Math.random() * 500));
   }
   throw last;
 }
 
 // Bare-earth grid covering bounds {s,n,w,e} at ~1 m (coarser if the area is large).
-export async function fetchDEM({ s, n, w, e }, { signal, onProgress } = {}) {
+// Large areas are fetched as compressed tiles (<= TILE px) in parallel: the service times out (504, which the
+// browser reports only as "Failed to fetch") on single large requests, and one failed tile retries alone.
+export const TILE = 600;
+export async function fetchDEM({ s, n, w, e }, { signal, onProgress, maxPx = MAX_PX } = {}) {
   const lat0 = (s + n) / 2;
   const wm = toLocal(lat0, e, lat0, w).x, hm = toLocal(n, w, s, w).y;
-  const scale = Math.max(1, Math.max(wm, hm) / MAX_PX);
+  const scale = Math.max(1, Math.max(wm, hm) / maxPx);
   const W = Math.max(8, Math.round(wm / scale)), H = Math.max(8, Math.round(hm / scale));
-  const url = `${SVC}/exportImage?bbox=${w},${s},${e},${n}&bboxSR=4326&imageSR=4326&size=${W},${H}` +
-    '&format=tiff&pixelType=F32&noDataInterpretation=esriNoDataMatchAny&interpolation=RSP_BilinearInterpolation&f=image';
-  onProgress?.('Downloading lidar…');
-  const r = await robustFetch(url, { signal });
-  const buf = await r.arrayBuffer();
-  onProgress?.('Reading lidar…');
-  let img;
-  try { img = await (await fromArrayBuffer(buf)).getImage(); }
-  catch { throw new Error('Elevation service returned an unreadable image. Try again.'); }
-  const [raw] = await img.readRasters();
-  const iw = img.getWidth(), ih = img.getHeight();
-  // Use the grid's own georeferencing when present; the server may snap the extent.
-  let bb = [w, s, e, n];
-  try { const g = img.getBoundingBox(); if (g.every(Number.isFinite) && Math.abs(g[0]) <= 180 && Math.abs(g[1]) <= 90) bb = g; } catch { /* keep requested */ }
-  const data = new Float32Array(iw * ih);
-  let good = 0;
-  for (let i = 0; i < data.length; i++) { const z = raw[i]; if (valid(z)) { data[i] = z; good++; } else data[i] = NaN; }
-  const latc = (bb[1] + bb[3]) / 2;
-  const dx = toLocal(latc, bb[0] + (bb[2] - bb[0]) / iw, latc, bb[0]).x;
-  const dy = toLocal(bb[1] + (bb[3] - bb[1]) / ih, bb[0], bb[1], bb[0]).y;
-  return { data, W: iw, H: ih, w: bb[0], s: bb[1], e: bb[2], n: bb[3], dx, dy, coverage: good / data.length };
+  const nx = Math.ceil(W / TILE), ny = Math.ceil(H / TILE);
+  const data = new Float32Array(W * H).fill(NaN);
+  const jobs = [];
+  for (let ty = 0; ty < ny; ty++) for (let tx = 0; tx < nx; tx++) {
+    const x0 = Math.floor((tx * W) / nx), x1 = Math.floor(((tx + 1) * W) / nx), y0 = Math.floor((ty * H) / ny), y1 = Math.floor(((ty + 1) * H) / ny);
+    jobs.push({ x0, y0, tw: x1 - x0, th: y1 - y0,
+      bb: [w + ((e - w) * x0) / W, n - ((n - s) * y1) / H, w + ((e - w) * x1) / W, n - ((n - s) * y0) / H] });
+  }
+  let done = 0;
+  const say = () => onProgress?.(jobs.length > 1 ? `Downloading lidar… ${done} of ${jobs.length}` : 'Downloading lidar…');
+  say();
+  const one = async (j) => {
+    const [jw, js, je, jn] = j.bb;
+    const url = `${SVC}/exportImage?bbox=${jw},${js},${je},${jn}&bboxSR=4326&imageSR=4326&size=${j.tw},${j.th}` +
+      '&format=tiff&compression=LZ77&pixelType=F32&noDataInterpretation=esriNoDataMatchAny&interpolation=RSP_BilinearInterpolation&f=image';
+    const r = await robustFetch(url, { signal, tries: 4 });
+    const buf = await r.arrayBuffer();
+    let img;
+    try { img = await (await fromArrayBuffer(buf)).getImage(); }
+    catch { throw new Error('The elevation service sent an unreadable file. Try again.'); }
+    const [raw] = await img.readRasters();
+    const iw = Math.min(img.getWidth(), j.tw), ih = Math.min(img.getHeight(), j.th);
+    for (let y = 0; y < ih; y++) for (let x = 0; x < iw; x++) {
+      const z = raw[y * img.getWidth() + x];
+      data[(j.y0 + y) * W + j.x0 + x] = valid(z) ? z : NaN;
+    }
+    done++; say();
+  };
+  // At most 4 requests at a time.
+  const queue = jobs.slice();
+  await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, async () => { while (queue.length) await one(queue.shift()); }));
+  let good = 0; for (let i = 0; i < data.length; i++) if (data[i] === data[i]) good++;
+  const latc = (s + n) / 2;
+  const dx = toLocal(latc, w + (e - w) / W, latc, w).x, dy = toLocal(s + (n - s) / H, w, s, w).y;
+  return { data, W, H, w, s, e, n, dx, dy, coverage: good / data.length };
 }
 
 // Bilinear sample in metres; NaN outside the grid or next to no-data.

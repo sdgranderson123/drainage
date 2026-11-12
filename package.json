@@ -8,7 +8,7 @@
   "name": "fieldgrade",
   "private": true,
   "scripts": {
-    "test": "node --test earthwork.test.mjs tests/source.test.mjs tests/hydro.test.mjs tests/storm.test.mjs",
+    "test": "node --test earthwork.test.mjs tests/source.test.mjs tests/hydro.test.mjs tests/storm.test.mjs tests/design.test.mjs",
     "test:e2e": "node tests/e2e.mjs",
     "test:live": "node tests/live-check.mjs",
     "lint": "html-validate index.html",

@@ -1,8 +1,9 @@
 import { toLocal, pointInPolygon, polygonArea, fitPlane, planeFromSlope, slopeOf, designZ, volumes, balance,
   profileStats, quantile, hillshade, rampColor, toCSV, parseLatLon, M_TO_FT, M3_TO_YD3, M2_TO_AC } from './earthwork.js';
-import { fetchDEM, sample, pointElevation, geocode, lidarSource } from './dem.js';
+import { fetchDEM, sample, pointElevation, geocode, lidarSource, robustFetch } from './dem.js';
 import { fillDepressions, d8, accumulate, snapOutlet, watershed, flowPath, scsRunoff, tcLag, tcKirpich, tr55Peak, LAND_USE } from './hydro.js';
 import { openStorm } from './storm3d.js';
+import { applyEdits, rasterPolygon, surfaceDiff, exitPoints, groupExits, wetlandOverlap, cellLatLon } from './design.js';
 
 const L = window.L;
 const $ = (id) => document.getElementById(id);
@@ -33,13 +34,29 @@ map.on('moveend', () => { const c = map.getCenter(); store.set('view', { lat: c.
 
 // ---------------- status / busy ----------------
 let busy = 0;
-function status(msg, err = false) { $('status').textContent = msg || ''; $('status').classList.toggle('err', !!err); }
-async function withBusy(fn) {
-  busy++; $('progress').hidden = false;
-  try { return await fn(); }
-  catch (e) { if (e.name !== 'AbortError') { status(e.message || String(e), true); console.error(e); } }
-  finally { if (--busy === 0) $('progress').hidden = true; }
+// Status shows in the panel and, while working or on error, in a card on the map where the user is looking.
+let lastAction = null;
+function status(msg, err = false) {
+  $('status').textContent = msg || ''; $('status').classList.toggle('err', !!err);
+  if (busy && msg && !err) showMapMsg(msg, 'busy');
 }
+function showMapMsg(msg, kind) {
+  const el = $('mapmsg');
+  if (!msg) { el.hidden = true; return; }
+  el.hidden = false; el.className = `mapmsg ${kind}`;
+  $('mapmsgText').textContent = msg;
+  $('mapmsgRetry').hidden = kind !== 'err' || !lastAction;
+}
+$('mapmsgClose').onclick = () => showMapMsg('');
+$('mapmsgRetry').onclick = () => { const a = lastAction; showMapMsg(''); a?.(); };
+async function withBusy(fn, retry) {
+  busy++; $('progress').hidden = false; showMapMsg('Working…', 'busy');
+  if (retry) lastAction = retry;
+  try { const r = await fn(); return r; }
+  catch (e) { if (e.name !== 'AbortError') { status(e.message || String(e), true); showMapMsg(e.message || String(e), 'err'); console.error(e); } }
+  finally { if (--busy === 0) { $('progress').hidden = true; if (!$('mapmsg').classList.contains('err') && !$('mapmsg').classList.contains('info')) showMapMsg(''); } }
+}
+function hint(msg) { showMapMsg(msg, 'info'); }
 
 // ---------------- search / locate ----------------
 $('search').addEventListener('submit', (e) => {
@@ -185,13 +202,18 @@ async function showSource(lat, lon, el, warnEl) {
 const draw = { mode: null, pts: [], line: null, ghost: null, markers: [] };
 const TOOL = { profile: { btn: 'bProf', title: 'Elevation profile', hint: 'Click along the line.', min: 2 },
   field: { btn: 'bField', title: 'Field outline', hint: 'Click each corner of the field.', min: 3 },
+  pond: { btn: 'bPond', title: 'Retention pond', hint: 'Click the corners of the pond.', min: 3 },
+  grade: { btn: 'bGrade', title: 'Raise / lower area', hint: 'Click the corners of the area to adjust.', min: 3 },
+  tile: { btn: 'bTile', title: 'Drain tile', hint: 'Click along the tile line, outlet end last or first.', min: 2 },
   shed: { btn: 'bShed', title: 'Drainage outlet', hint: 'Click the culvert, tile outlet or ditch point the water drains to.', min: 1 } };
 function startDraw(mode) {
   cancelDraw();
   draw.mode = mode; draw.pts = [];
   $(TOOL[mode].btn).setAttribute('aria-pressed', 'true');
   $('dbTitle').textContent = TOOL[mode].title; $('dbHint').textContent = TOOL[mode].hint;
-  $('drawbar').hidden = false; map.getContainer().style.cursor = 'crosshair';
+  $('drawbar').hidden = false; map.getContainer().style.cursor = 'crosshair'; map.getContainer().classList.add('drawing');
+  $('bUndo').hidden = $('bDone').hidden = mode === 'shed';
+  if (mode === 'shed') showChannels();
   updateDraw();
 }
 function cancelDraw() {
@@ -199,7 +221,7 @@ function cancelDraw() {
   $(TOOL[draw.mode].btn).setAttribute('aria-pressed', 'false');
   for (const l of [draw.line, draw.ghost, ...draw.markers]) if (l) map.removeLayer(l);
   Object.assign(draw, { mode: null, pts: [], line: null, ghost: null, markers: [] });
-  $('drawbar').hidden = true; map.getContainer().style.cursor = '';
+  $('drawbar').hidden = true; map.getContainer().style.cursor = ''; map.getContainer().classList.remove('drawing');
 }
 function pathLength(pts) { let d = 0; for (let i = 1; i < pts.length; i++) d += map.distance(pts[i - 1], pts[i]); return d; }
 function areaOf(pts) {
@@ -207,7 +229,9 @@ function areaOf(pts) {
   return polygonArea(pts.map((p) => { const q = toLocal(p.lat, p.lng, lat0, lon0); return [q.x, q.y]; }));
 }
 function measureText(mode, pts) {
-  if (mode === 'shed') return 'One click places the outlet. It snaps to the nearest channel within 160 ft; drag it afterwards to adjust.';
+  if (mode === 'shed') return 'Tap the culvert or channel. It snaps to the nearest blue channel.';
+  if (mode === 'tile') return pts.length > 1 ? `${fmt(pathLength(pts) * M_TO_FT)} ft of tile` : 'Click the start of the tile line.';
+  if (mode === 'pond' || mode === 'grade') return pts.length > 2 ? `${(areaOf(pts) * M2_TO_AC).toFixed(2)} ac` : `${pts.length} corner${pts.length === 1 ? '' : 's'}`;
   if (mode === 'profile') return pts.length > 1 ? `${pts.length} points · ${fmt(pathLength(pts) * M_TO_FT)} ft` : `${pts.length} point${pts.length === 1 ? '' : 's'}`;
   return pts.length > 2 ? `${pts.length} corners · ${(areaOf(pts) * M2_TO_AC).toFixed(2)} ac` : `${pts.length} corner${pts.length === 1 ? '' : 's'}`;
 }
@@ -215,7 +239,7 @@ function updateDraw(cursor) {
   const { mode, pts } = draw; if (!mode) return;
   const shown = cursor ? [...pts, cursor] : pts;
   if (draw.line) map.removeLayer(draw.line);
-  draw.line = mode === 'field' && shown.length > 2
+  draw.line = (mode === 'field' || mode === 'pond' || mode === 'grade') && shown.length > 2
     ? L.polygon(shown, { color: '#ffd400', weight: 2, fillOpacity: 0.12, dashArray: cursor ? '6 6' : null, interactive: false }).addTo(map)
     : shown.length > 1 ? L.polyline(shown, { color: '#ffd400', weight: 3, interactive: false }).addTo(map) : null;
   draw.markers.forEach((m) => map.removeLayer(m));
@@ -248,6 +272,7 @@ function finishDraw() {
   const mode = draw.mode;
   if (pts.length < TOOL[mode].min) { status(mode === 'field' ? 'A field needs at least 3 corners.' : 'A profile needs at least 2 points.', true); return; }
   cancelDraw();
+  if (mode === 'pond' || mode === 'grade' || mode === 'tile') { addEdit(mode, pts); return; }
   if (mode === 'profile') setProfile(pts); else if (mode === 'shed') setShed(pts[pts.length - 1]); else setField(pts);
 }
 
@@ -391,8 +416,9 @@ let fieldSeq = 0;
 function loadField() {
   const seq = ++fieldSeq, poly = field.pts;
   withBusy(async () => {
-    const b = L.latLngBounds(poly), pad = Math.max(0.0002, (b.getNorth() - b.getSouth()) * 0.02);
-    const dem = (field.dem && L.latLngBounds([[field.dem.s, field.dem.w], [field.dem.n, field.dem.e]]).contains(b)) ? field.dem
+    // Load the surroundings too (30% each side) so flow paths and storms show where water goes off the field.
+    const b = L.latLngBounds(poly), pad = Math.max(0.0006, Math.max(b.getNorth() - b.getSouth(), b.getEast() - b.getWest()) * 0.3);
+    const dem = (field.dem && L.latLngBounds([[field.dem.s, field.dem.w], [field.dem.n, field.dem.e]]).pad(-0.12).contains(b)) ? field.dem
       : await fetchDEM({ s: b.getSouth() - pad, n: b.getNorth() + pad, w: b.getWest() - pad, e: b.getEast() + pad }, { onProgress: (m) => status(m) });
     if (seq !== fieldSeq) return;
     const lat0 = (dem.s + dem.n) / 2, lon0 = (dem.w + dem.e) / 2;
@@ -408,9 +434,13 @@ function loadField() {
       if (Number.isFinite(z)) cells.push({ i, j, lat, lon, x: q.x, y: q.y, z });
     }
     if (cells.length < 10) throw new Error('Too little lidar inside this field — draw a larger area or check coverage.');
-    Object.assign(field, { dem, cells, cellArea, P, origin: [lat0, lon0], area: polygonArea(P), coverage: cells.length / Math.max(1, inside) });
-    $('fieldBox').hidden = false;
+    const mask = new Uint8Array(dem.W * dem.H); for (const c of cells) mask[c.j * dem.W + c.i] = 1;
+    const newDem = field.dem !== dem;
+    Object.assign(field, { dem, cells, cellArea, P, mask, origin: [lat0, lon0], area: polygonArea(P), coverage: cells.length / Math.max(1, inside) });
+    $('fieldBox').hidden = false; $('sdBox').hidden = false;
     computeField(); status('');
+    refreshDesign();
+    if (newDem || !field.wet) loadWetlands(); else showWetlandResult();
   });
 }
 function readNum(id, lo, hi, dflt) { const v = parseFloat($(id).value); const ok = Number.isFinite(v) && v >= lo && v <= hi; $(id).setAttribute('aria-invalid', String(!ok)); return ok ? v : dflt; }
@@ -478,16 +508,176 @@ $('printBtn').onclick = () => {
   if (field) map.fitBounds(field.edit.shape.getBounds(), { padding: [30, 30], animate: false });
   setTimeout(() => window.print(), 400);
 };
-$('fieldStorm').onclick = () => {
-  if (!field?.dem) return;
-  const { dem, cells } = field, mask = new Uint8Array(dem.W * dem.H);
-  for (const c of cells) mask[c.j * dem.W + c.i] = 1;
-  openStorm(dem, { title: 'Storm on the field', mask, depthIn: designDepth(), CN: +$('cn').value || 78 });
-};
+$('fieldStorm').onclick = () => openDesignStorm();
 $('exCsv').onclick = () => field?.cells && download('field-existing.csv', toCSV(['lat', 'lon', 'elev_ft'],
   field.cells.map((p) => [p.lat.toFixed(7), p.lon.toFixed(7), ft(p.z, 3)])));
 $('deCsv').onclick = () => field?.plane && download('field-design.csv', toCSV(['lat', 'lon', 'existing_ft', 'design_ft', 'cut_fill_ft'],
   field.cells.map((p) => { const d = designZ(field.plane, p.x, p.y); return [p.lat.toFixed(7), p.lon.toFixed(7), ft(p.z, 3), ft(d, 3), ft(p.z - d, 3)]; })));
+
+// ---------------- site design: flow paths, edits, wetlands ----------------
+const EDIT_COLORS = { pond: '#2d68c4', grade: '#e07b00', tile: '#7a3cc8' };
+let edits = (store.get('edits') || []).filter((e) => e && Array.isArray(e.pts));
+let designLayers = [], editLayers = [], wetLayer = null, design = null, designSeq = 0;
+function saveEdits() { store.set('edits', edits); }
+function clearDesignLayers() { [...designLayers, ...editLayers].forEach((l) => map.removeLayer(l)); designLayers = []; editLayers = []; if (wetLayer) map.removeLayer(wetLayer); wetLayer = null; }
+['bPond', 'bGrade', 'bTile'].forEach((id) => { $(id).onclick = () => {
+  if (!field?.dem) { hint('Outline the field first (Field cut & fill), then add ponds, tile or grading inside it.'); return; }
+  const m = { bPond: 'pond', bGrade: 'grade', bTile: 'tile' }[id]; draw.mode === m ? cancelDraw() : startDraw(m);
+}; });
+$('bWhole').onclick = () => { if (field?.pts) addEdit('grade', field.pts.slice()); };
+function addEdit(type, pts) {
+  const e = { type, pts: pts.map((p) => [p.lat, p.lng]), id: Date.now().toString(36) };
+  if (type === 'pond') Object.assign(e, { depthFt: 4, sideSlope: 3 });
+  if (type === 'grade') Object.assign(e, { mode: 'offset', valueFt: 1 });
+  if (type === 'tile') Object.assign(e, { depthFt: 4, diaIn: 6 });
+  edits.push(e); saveEdits(); refreshDesign();
+}
+const surfaceMode = () => document.querySelector('input[name=surf]:checked').value;
+document.querySelectorAll('input[name=surf]').forEach((r) => r.addEventListener('change', () => refreshDesign()));
+$('showFlow').onchange = () => refreshDesign();
+$('showWet').onchange = () => { if (wetLayer) (($('showWet').checked) ? wetLayer.addTo(map) : map.removeLayer(wetLayer)); };
+function renderEditList() {
+  const label = { pond: 'Pond', grade: 'Raise / lower', tile: 'Drain tile' };
+  $('editList').innerHTML = edits.map((e, k) => {
+    const inf = design?.info[k] || {};
+    let fields = '', stat = '';
+    if (e.type === 'pond') {
+      fields = `<label>Depth, ft<input data-k="${k}" data-f="depthFt" type="number" min="1" max="30" step="0.5" value="${e.depthFt}"></label>
+        <label>Side slope, H:1<input data-k="${k}" data-f="sideSlope" type="number" min="1" max="10" step="0.5" value="${e.sideSlope}"></label>`;
+      if (inf.cells) stat = `${(inf.areaM2 * M2_TO_AC).toFixed(2)} ac · bottom ${ft(inf.bottom, 1)} ft · storage ${(inf.storageM3 / 1233.48).toFixed(2)} ac-ft · dig ${fmt(inf.excavationM3 * M3_TO_YD3)} yd³`;
+    } else if (e.type === 'grade') {
+      fields = `<label>Change<select data-k="${k}" data-f="mode"><option value="offset"${e.mode === 'offset' ? ' selected' : ''}>Raise/lower by, ft</option><option value="elev"${e.mode === 'elev' ? ' selected' : ''}>Set to elevation, ft</option></select></label>
+        <label>Value<input data-k="${k}" data-f="valueFt" type="number" step="0.1" value="${e.valueFt}"></label>`;
+      if (inf.cells) stat = `${(inf.areaM2 * M2_TO_AC).toFixed(2)} ac · cut ${fmt(inf.cutM3 * M3_TO_YD3)} yd³ · fill ${fmt(inf.fillM3 * M3_TO_YD3)} yd³`;
+    } else {
+      fields = `<label>Diameter<select data-k="${k}" data-f="diaIn">${[4, 5, 6, 8, 10, 12, 15, 18].map((d) => `<option value="${d}"${+e.diaIn === d ? ' selected' : ''}>${d} in</option>`).join('')}</select></label>
+        <label>Depth, ft<input data-k="${k}" data-f="depthFt" type="number" min="2" max="10" step="0.5" value="${e.depthFt}"></label>`;
+      if (inf.cells?.length) stat = `${fmt(inf.lengthM * M_TO_FT)} ft at ${(inf.slope * 100).toFixed(2)}% · carries ${inf.capacityCfs.toFixed(2)} cfs · serves ~${Math.round(inf.acresServed)} ac at 3/8 in/day`;
+    }
+    return `<li class="edit"><div class="edhead"><span class="sw" style="background:${EDIT_COLORS[e.type]}"></span><b>${label[e.type]} ${k + 1}</b>
+      <button type="button" class="link" data-del="${k}">Remove</button></div><div class="grid2">${fields}</div><div class="small muted">${stat || '—'}</div></li>`;
+  }).join('') || '<li class="small muted">No changes yet. Add a pond, raise or lower an area, or lay drain tile.</li>';
+  $('editList').querySelectorAll('[data-del]').forEach((b) => b.onclick = () => { edits.splice(+b.dataset.del, 1); saveEdits(); refreshDesign(); });
+  $('editList').querySelectorAll('[data-f]').forEach((el) => el.onchange = () => {
+    const e = edits[+el.dataset.k], f = el.dataset.f; e[f] = f === 'mode' ? el.value : parseFloat(el.value); saveEdits(); refreshDesign();
+  });
+}
+function drawEditShapes() {
+  editLayers.forEach((l) => map.removeLayer(l)); editLayers = [];
+  edits.forEach((e, k) => {
+    const c = EDIT_COLORS[e.type];
+    const lyr = e.type === 'tile' ? L.polyline(e.pts, { color: c, weight: 4, dashArray: '2 6' }) : L.polygon(e.pts, { color: c, weight: 2, fillOpacity: e.type === 'pond' ? 0.35 : 0.12 });
+    lyr.bindTooltip(`${{ pond: 'Pond', grade: 'Raise / lower', tile: 'Drain tile' }[e.type]} ${k + 1}`);
+    editLayers.push(lyr.addTo(map));
+    const inf = design?.info[k];
+    if (e.type === 'tile' && inf?.outlet != null) editLayers.push(L.circleMarker(cellLatLon(field.dem, inf.outlet), { radius: 6, color: '#fff', weight: 2, fillColor: c, fillOpacity: 1 }).bindTooltip('Tile outlet').addTo(map));
+  });
+}
+// Rebuild the design surface, flow paths, exits and the summary. Heavy steps run after a paint.
+function refreshDesign() {
+  if (!field?.dem) return;
+  const seq = ++designSeq;
+  withBusy(async () => {
+    status('Updating drainage paths…'); await new Promise((r) => setTimeout(r, 30));
+    const { dem, mask } = field;
+    design = applyEdits(dem, dem.data, edits);
+    if (seq !== designSeq) return;
+    const surf = surfaceMode() === 'design' ? design.z : dem.data;
+    const fl = fillDepressions(surf, dem.W, dem.H), rec = d8(fl, dem.W, dem.H, dem.dx, dem.dy);
+    // Accumulate only water that starts on the field, so paths show the field's drainage and where it goes after.
+    const fromField = accumulate(rec, dem.W * dem.H, mask);
+    const exits = groupExits(exitPoints(mask, rec, dem.W), dem.W, dem.dx, dem.dy, Math.max(20, Math.sqrt(field.area) * 0.2));
+    if (seq !== designSeq) return;
+    Object.assign(design, { rec, fromField, exits });
+    designLayers.forEach((l) => map.removeLayer(l)); designLayers = [];
+    if ($('showFlow').checked) {
+      const ac = (dem.dx * dem.dy) / 4046.86, thr = Math.max(0.25, field.area * M2_TO_AC * 0.01) / ac;
+      designLayers.push(L.imageOverlay(flowImage(dem, fromField, thr, mask), [[dem.s, dem.w], [dem.n, dem.e]], { opacity: 0.95, interactive: false }).addTo(map));
+      const total = field.cells.length;
+      exits.filter((x) => x.cells / total >= 0.05).slice(0, 6).forEach((x) => {
+        const pct = (100 * x.cells) / total, acres = x.cells * ac;
+        const m = L.marker(cellLatLon(dem, x.i), { icon: L.divIcon({ className: 'exit', html: `<span>${Math.round(pct)}%</span>`, iconSize: [34, 34] }), keyboard: false })
+          .bindTooltip(`${acres.toFixed(1)} ac (${pct.toFixed(0)}% of the field) drains off here`).addTo(map);
+        designLayers.push(m);
+      });
+    }
+    drawEditShapes(); renderEditList(); designSummary();
+    field.edit.shape.bringToFront();
+    status('');
+  }, refreshDesign);
+}
+function flowImage(dem, acc, thr, mask) {
+  const W = dem.W, H = dem.H, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), im = g.createImageData(W, H);
+  const px = Math.max(1, Math.round(W / Math.max(300, map.getSize().x)));
+  let mx = 0; for (let i = 0; i < W * H; i++) if (acc[i] > mx) mx = acc[i];
+  for (let i = 0; i < W * H; i++) {
+    if (acc[i] < thr) continue;
+    const t = Math.min(1, Math.log(acc[i] / thr) / Math.log(Math.max(2, mx / thr))), r = px * (t > 0.66 ? 3 : t > 0.33 ? 2 : 1);
+    const x0 = i % W, y0 = (i / W) | 0, off = !mask[i];
+    for (let y = Math.max(0, y0 - r); y <= Math.min(H - 1, y0 + r); y++) for (let x = Math.max(0, x0 - r); x <= Math.min(W - 1, x0 + r); x++) {
+      const k = (y * W + x) * 4; if (im.data[k + 3] === 255) continue;
+      // inside the field: blue; after leaving it: orange so off-site flow stands out
+      if (off) { im.data[k] = 255; im.data[k + 1] = 140; im.data[k + 2] = 0; } else { im.data[k] = 30; im.data[k + 1] = 120; im.data[k + 2] = 255; }
+      im.data[k + 3] = 255;
+    }
+  }
+  g.putImageData(im, 0, 0); return c.toDataURL();
+}
+function designSummary() {
+  const v = surfaceDiff(field.dem.data, design.z, null, field.dem.dx * field.dem.dy);
+  const ponds = design.info.filter((i) => i.type === 'pond' && i.cells), tiles = design.info.filter((i) => i.type === 'tile' && i.cells?.length);
+  const total = field.cells.length, ac = (field.dem.dx * field.dem.dy) / 4046.86, main = design.exits[0];
+  $('sdStats').innerHTML = `
+    <dt>Water leaves the field</dt><dd>${main ? `main exit takes ${Math.round((100 * main.cells) / total)}%` : '—'}${design.exits.length > 1 ? `, ${design.exits.filter((x) => x.cells / total >= 0.05).length} exits over 5%` : ''}</dd>
+    <dt>Changes: cut / fill</dt><dd>${fmt(v.cutM3 * M3_TO_YD3)} / ${fmt(v.fillM3 * M3_TO_YD3)} yd³</dd>
+    <dt>Net</dt><dd>${v.fillM3 > v.cutM3 ? `import ${fmt((v.fillM3 - v.cutM3) * M3_TO_YD3)} yd³` : `export ${fmt((v.cutM3 - v.fillM3) * M3_TO_YD3)} yd³`}</dd>
+    ${ponds.length ? `<dt>Pond storage</dt><dd>${(ponds.reduce((a, p) => a + p.storageM3, 0) / 1233.48).toFixed(2)} ac-ft</dd>` : ''}
+    ${tiles.length ? `<dt>Tile capacity</dt><dd>${tiles.reduce((a, t) => a + t.capacityCfs, 0).toFixed(2)} cfs</dd>` : ''}`;
+  showWetlandResult();
+}
+function openDesignStorm() {
+  if (!field?.dem || !design) return;
+  const sinks = design.info.filter((i) => i.type === 'tile' && i.cells?.length).map((i) => ({ cells: i.cells, capM3s: i.capacityCfs * 0.0283168 }));
+  openStorm({ ...field.dem, data: surfaceMode() === 'design' || edits.length ? design.z : field.dem.data },
+    { title: `Storm on the ${(field.area * M2_TO_AC).toFixed(0)}-acre field${edits.length ? ' (with your changes)' : ''}`, mask: field.mask, sinks, depthIn: designDepth(), CN: +$('cn').value || 78, maxCells: 128 });
+}
+$('sdStorm').onclick = openDesignStorm;
+
+// NWI wetlands (USFWS National Wetlands Inventory). Mapped wetlands are a screening layer, not a delineation.
+const NWI = 'https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query';
+function loadWetlands() {
+  if (!field?.dem) return;
+  const d = field.dem;
+  $('wetResult').textContent = 'Checking the National Wetlands Inventory…';
+  (async () => {
+    try {
+      const url = `${NWI}?where=1%3D1&geometry=${d.w},${d.s},${d.e},${d.n}&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects` +
+        '&outFields=ATTRIBUTE,WETLAND_TYPE,ACRES&outSR=4326&returnGeometry=true&geometryPrecision=6&f=geojson';
+      const r = await robustFetch(url, { timeout: 60000, tries: 6, name: 'USFWS wetlands service' });
+      const gj = await r.json();
+      field.wet = { features: gj.features || [], overlap: wetlandOverlap(d, field.mask, gj.features || []) };
+      if (wetLayer) map.removeLayer(wetLayer);
+      wetLayer = L.geoJSON(gj, { style: { color: '#0f9b8e', weight: 1.5, fillColor: '#0f9b8e', fillOpacity: 0.28, dashArray: '4 3' },
+        onEachFeature: (f, l) => l.bindTooltip(`${f.properties.WETLAND_TYPE} (${f.properties.ATTRIBUTE}), ${(+f.properties.ACRES).toFixed(2)} ac`) });
+      if ($('showWet').checked) wetLayer.addTo(map);
+      showWetlandResult();
+    } catch (e) { console.warn('NWI', e); $('wetResult').innerHTML = '<span class="err">The USFWS wetlands service is not responding (it goes down at times).</span> <button type="button" class="link" id="wetRetry">Try again</button>'; $('wetRetry').onclick = loadWetlands; }
+  })();
+}
+function showWetlandResult() {
+  const w = field?.wet; if (!w) return;
+  const o = w.overlap, acres = o.totalM2 * M2_TO_AC;
+  // Edits that disturb mapped wetland
+  let touched = 0;
+  if (design && acres > 0) for (let i = 0; i < o.mask.length; i++) if (o.mask[i] && Math.abs(design.z[i] - field.dem.data[i]) > 0.03) touched++;
+  const tA = touched * field.dem.dx * field.dem.dy * M2_TO_AC;
+  $('wetResult').innerHTML = acres > 0.005
+    ? `<b class="err">${acres.toFixed(2)} ac of mapped wetland inside the field</b> (${o.byType.map(([t, a]) => `${t} ${(a * M2_TO_AC).toFixed(2)} ac`).join('; ')}).` +
+      (tA > 0.005 ? ` <b class="err">Your changes disturb ${tA.toFixed(2)} ac of it.</b>` : '') +
+      ' Check permitting (Section 404 / Swampbuster) before work.'
+    : `No mapped wetlands inside the field${w.features.length ? ` (${w.features.length} nearby, shown in teal)` : ''}.`;
+}
 
 // ---------------- drainage area & peak flow ----------------
 const RP = [2, 10, 25, 50, 100];
@@ -506,66 +696,41 @@ let shed = null, shedSeq = 0;
     const r = {}; RP.forEach((k) => { const v = parseFloat($(`p${k}`).value); if (Number.isFinite(v)) r[k] = v; });
     store.set('rain', r); shedResults();
   }));
-  $('shedRadius').onchange = () => shed && computeShed(true);
+  $('shedRadius').onchange = () => { if (shed) { flow = null; computeShed(); } };
 }
 function designDepth() { for (const y of [100, 50, 25, 10, 2]) { const v = parseFloat($(`p${y}`).value); if (Number.isFinite(v)) return v; } return 5; }
 
-function setShed(ll) {
-  if (shed) shed.layers.forEach((l) => map.removeLayer(l));
-  shed = { outlet: ll, layers: [] };
-  store.set('shed', [ll.lat, ll.lng]);
-  $('intro').hidden = true;
-  $('noaaLink').href = `https://hdsc.nws.noaa.gov/pfds/pfds_map_cont.html?lat=${ll.lat.toFixed(4)}&lon=${ll.lng.toFixed(4)}`;
-  computeShed(true);
+// Flow grid (filled DEM, D8 receivers, accumulation) for an area; reused across clicks.
+let flow = null, chanLayer = null, flowSeq = 0;
+async function buildFlow(bounds, onProgress) {
+  const dem = await fetchDEM(bounds, { onProgress });
+  onProgress('Tracing where water flows…');
+  await new Promise((r) => setTimeout(r, 30));
+  const f = fillDepressions(dem.data, dem.W, dem.H), rec = d8(f, dem.W, dem.H, dem.dx, dem.dy), acc = accumulate(rec, dem.W * dem.H);
+  return { dem, rec, acc, bounds: L.latLngBounds([[dem.s, dem.w], [dem.n, dem.e]]) };
 }
-function computeShed(refetch) {
-  const seq = ++shedSeq, ll = shed.outlet, R = +$('shedRadius').value;
+// Show the channel network for the current view so the user can see where to click.
+function showChannels() {
+  const z = map.getZoom();
+  if (z < 13) { hint('Zoom in closer (to a few miles across), then pick the tool again to see the drainage channels.'); return; }
+  const v = map.getBounds();
+  if (flow && flow.bounds.contains(v)) { drawChannels(); hint('Click a blue channel at the culvert or outlet you want to size.'); return; }
+  const seq = ++flowSeq, pb = v.pad(0.1);
   withBusy(async () => {
-    if (refetch || !shed.dem) {
-      const dLat = R / 111320, dLon = R / (111320 * Math.cos(ll.lat * Math.PI / 180));
-      const dem = await fetchDEM({ s: ll.lat - dLat, n: ll.lat + dLat, w: ll.lng - dLon, e: ll.lng + dLon }, { onProgress: (m) => status(m) });
-      if (seq !== shedSeq) return;
-      status('Tracing flow paths…');
-      await new Promise((r) => setTimeout(r, 20));
-      const f = fillDepressions(dem.data, dem.W, dem.H), rec = d8(f, dem.W, dem.H, dem.dx, dem.dy), acc = accumulate(rec, dem.W * dem.H);
-      Object.assign(shed, { dem, rec, acc });
-    }
-    const { dem, rec, acc } = shed;
-    const px = Math.floor(((ll.lng - dem.w) / (dem.e - dem.w)) * dem.W), py = Math.floor(((dem.n - ll.lat) / (dem.n - dem.s)) * dem.H);
-    if (px < 0 || py < 0 || px >= dem.W || py >= dem.H) throw new Error('Outlet is outside the lidar area.');
-    // Snap to the strongest flow line within 50 ft; if that isn't a real channel (2+ acres), look out to 160 ft.
-    const chan = (2 * 4046.86) / (dem.dx * dem.dy);
-    let out = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(1, Math.round(15 / dem.dx)));
-    if (acc[out] < chan) { const far = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(2, Math.round(50 / dem.dx))); if (acc[far] >= chan) out = far; }
-    const ws = watershed(rec, dem.W, dem.H, out, dem.dx, dem.dy);
-    const cellA = dem.dx * dem.dy, areaM2 = ws.cells.length * cellA;
-    const path = flowPath(rec, ws.far, out);
-    const zOut = dem.data[out], zTop = dem.data[ws.far], pathLen = ws.len[ws.far];
-    // Average land slope over the basin (central differences on the unfilled surface).
-    let ss = 0, sn = 0;
-    for (const c of ws.cells) {
-      const x = c % dem.W, y = (c / dem.W) | 0; if (x < 1 || y < 1 || x >= dem.W - 1 || y >= dem.H - 1) continue;
-      const gx = (dem.data[c + 1] - dem.data[c - 1]) / (2 * dem.dx), gy = (dem.data[c + dem.W] - dem.data[c - dem.W]) / (2 * dem.dy);
-      if (Number.isFinite(gx) && Number.isFinite(gy)) { ss += Math.hypot(gx, gy); sn++; }
-    }
-    const idxLL = (i) => [dem.n - ((((i / dem.W) | 0) + 0.5) / dem.H) * (dem.n - dem.s), dem.w + (((i % dem.W) + 0.5) / dem.W) * (dem.e - dem.w)];
-    Object.assign(shed, { ws, out, areaM2, L: pathLen, relief: zTop - zOut, pathSlope: pathLen > 0 ? (zTop - zOut) / pathLen : 0, basinSlope: sn ? ss / sn : 0,
-      snapped: L.latLng(...idxLL(out)), pathLL: path.filter((_, k) => k % 3 === 0 || k === path.length - 1).map(idxLL) });
-    if (seq !== shedSeq) return;
-    drawShed(); shedResults(); $('shedBox').hidden = false; status('');
-  });
+    const fl = await buildFlow({ s: pb.getSouth(), n: pb.getNorth(), w: pb.getWest(), e: pb.getEast() }, (m) => status(m));
+    if (seq !== flowSeq) return;
+    flow = fl; drawChannels(); status('');
+    if (draw.mode === 'shed') hint('Click a blue channel at the culvert or outlet you want to size.');
+  }, showChannels);
 }
-function drawShed() {
-  shed.layers.forEach((l) => map.removeLayer(l));
-  const { dem, ws, acc } = shed, c = document.createElement('canvas'); c.width = dem.W; c.height = dem.H;
-  const g = c.getContext('2d'), im = g.createImageData(dem.W, dem.H);
-  const ac = (dem.dx * dem.dy) / 4046.86, W = dem.W, H = dem.H;
-  for (let i = 0; i < W * H; i++) if (ws.mask[i]) { const k = i * 4; im.data[k] = 120; im.data[k + 1] = 60; im.data[k + 2] = 200; im.data[k + 3] = 70; }
-  // Channels (2+ acres draining) drawn wider for bigger flows so they stay visible when the image is scaled down.
+function channelImage(fl, mask) {
+  const { dem, acc } = fl, W = dem.W, H = dem.H, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), im = g.createImageData(W, H), ac = (dem.dx * dem.dy) / 4046.86;
+  if (mask) for (let i = 0; i < W * H; i++) if (mask[i]) { const k = i * 4; im.data[k] = 120; im.data[k + 1] = 60; im.data[k + 2] = 200; im.data[k + 3] = 75; }
   const px = Math.max(1, Math.round(W / Math.max(300, map.getSize().x)));
   for (let i = 0; i < W * H; i++) {
     const a = acc[i] * ac; if (a < 2) continue;
-    const r = px * (a >= 640 ? 3 : a >= 40 ? 2 : 1), x0 = i % W, y0 = (i / W) | 0, inB = ws.mask[i];
+    const r = px * (a >= 640 ? 3 : a >= 40 ? 2 : 1), x0 = i % W, y0 = (i / W) | 0, inB = mask ? mask[i] : 1;
     for (let y = Math.max(0, y0 - r); y <= Math.min(H - 1, y0 + r); y++) for (let x = Math.max(0, x0 - r); x <= Math.min(W - 1, x0 + r); x++) {
       const k = (y * W + x) * 4;
       if (im.data[k + 2] === 255 && im.data[k + 3] === 255) continue;
@@ -573,7 +738,82 @@ function drawShed() {
     }
   }
   g.putImageData(im, 0, 0);
-  const img = L.imageOverlay(c.toDataURL(), [[dem.s, dem.w], [dem.n, dem.e]], { opacity: 0.9 }).addTo(map);
+  return c.toDataURL();
+}
+function drawChannels() {
+  if (chanLayer) map.removeLayer(chanLayer);
+  if (shed?.ws) return; // the basin view draws its own channels
+  chanLayer = L.imageOverlay(channelImage(flow), [[flow.dem.s, flow.dem.w], [flow.dem.n, flow.dem.e]], { opacity: 0.9, interactive: false }).addTo(map);
+}
+
+function setShed(ll) {
+  if (shed) shed.layers.forEach((l) => map.removeLayer(l));
+  shed = { outlet: ll, layers: [] };
+  store.set('shed', [ll.lat, ll.lng]);
+  $('intro').hidden = true;
+  $('noaaLink').href = `https://hdsc.nws.noaa.gov/pfds/pfds_map_cont.html?lat=${ll.lat.toFixed(4)}&lon=${ll.lng.toFixed(4)}`;
+  computeShed();
+}
+function boxAround(ll, R) {
+  const dLat = R / 111320, dLon = R / (111320 * Math.cos(ll.lat * Math.PI / 180));
+  return { s: ll.lat - dLat, n: ll.lat + dLat, w: ll.lng - dLon, e: ll.lng + dLon };
+}
+function computeShed() {
+  const seq = ++shedSeq, ll = shed.outlet;
+  withBusy(async () => {
+    // Start from the loaded flow grid if it holds the outlet with some margin, else load around the outlet.
+    let fl = flow && flow.bounds.pad(-0.05).contains(ll) ? flow : null, R = +$('shedRadius').value;
+    for (let attempt = 0; ; attempt++) {
+      if (!fl) {
+        fl = await buildFlow(boxAround(ll, R), (m) => status(attempt ? `Drainage area is bigger than the loaded area. Loading a larger area… ${m}` : m));
+        if (seq !== shedSeq) return;
+        flow = fl;
+      }
+      const res = delineate(fl, ll);
+      // Grow the area until the basin no longer touches its edge (up to ~4 mi across).
+      if (res.ws.touchesEdge && attempt < 3) {
+        const cur = fl.bounds, half = Math.max(cur.getNorth() - cur.getSouth(), (cur.getEast() - cur.getWest()) * Math.cos(ll.lat * Math.PI / 180)) * 111320 / 2;
+        if (half < 3200) { R = Math.min(3200, half * 2); fl = null; continue; }
+      }
+      Object.assign(shed, res);
+      break;
+    }
+    if (seq !== shedSeq) return;
+    if (chanLayer) { map.removeLayer(chanLayer); chanLayer = null; }
+    drawShed(); shedResults(); $('shedBox').hidden = false; status('');
+    if (shed.areaM2 * M2_TO_AC < 1) hint('That spot drains less than an acre. Drag the blue outlet marker onto a channel.');
+    else if (window.matchMedia('(max-width: 760px)').matches) hint(`Drainage area: ${(shed.areaM2 * M2_TO_AC).toFixed(1)} acres. Results are below the map.`);
+  }, computeShed);
+}
+function delineate(fl, ll) {
+  const { dem, rec, acc } = fl;
+  const px = Math.floor(((ll.lng - dem.w) / (dem.e - dem.w)) * dem.W), py = Math.floor(((dem.n - ll.lat) / (dem.n - dem.s)) * dem.H);
+  if (px < 0 || py < 0 || px >= dem.W || py >= dem.H) throw new Error('That point is outside the loaded lidar. Try again.');
+  // Snap to the strongest flow line within 50 ft; if that isn't a real channel (2+ acres), look out to 160 ft.
+  const chan = (2 * 4046.86) / (dem.dx * dem.dy);
+  let out = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(1, Math.round(15 / dem.dx)));
+  for (const r of [50, 150]) {
+    if (acc[out] >= chan) break;
+    const far = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(2, Math.round(r / dem.dx))); if (acc[far] >= chan) out = far;
+  }
+  const ws = watershed(rec, dem.W, dem.H, out, dem.dx, dem.dy);
+  const areaM2 = ws.cells.length * dem.dx * dem.dy, path = flowPath(rec, ws.far, out);
+  const zOut = dem.data[out], zTop = dem.data[ws.far], pathLen = ws.len[ws.far];
+  let ss = 0, sn = 0;
+  for (const c of ws.cells) {
+    const x = c % dem.W, y = (c / dem.W) | 0; if (x < 1 || y < 1 || x >= dem.W - 1 || y >= dem.H - 1) continue;
+    const gx = (dem.data[c + 1] - dem.data[c - 1]) / (2 * dem.dx), gy = (dem.data[c + dem.W] - dem.data[c - dem.W]) / (2 * dem.dy);
+    if (Number.isFinite(gx) && Number.isFinite(gy)) { ss += Math.hypot(gx, gy); sn++; }
+  }
+  const idxLL = (i) => [dem.n - ((((i / dem.W) | 0) + 0.5) / dem.H) * (dem.n - dem.s), dem.w + (((i % dem.W) + 0.5) / dem.W) * (dem.e - dem.w)];
+  return { dem, rec, acc, ws, out, areaM2, L: pathLen, relief: zTop - zOut, pathSlope: pathLen > 0 ? (zTop - zOut) / pathLen : 0, basinSlope: sn ? ss / sn : 0,
+    snapped: L.latLng(...idxLL(out)), pathLL: path.filter((_, k) => k % 3 === 0 || k === path.length - 1).map(idxLL) };
+}
+function drawShed() {
+  shed.layers.forEach((l) => map.removeLayer(l));
+  const { dem, ws } = shed;
+  const url = channelImage({ dem, acc: shed.acc }, ws.mask);
+  const img = L.imageOverlay(url, [[dem.s, dem.w], [dem.n, dem.e]], { opacity: 0.9 }).addTo(map);
   const box = L.rectangle([[dem.s, dem.w], [dem.n, dem.e]], { color: '#ffffff', weight: 1, dashArray: '4 6', fill: false, interactive: false }).addTo(map);
   const lfp = L.polyline(shed.pathLL, { color: '#ffd400', weight: 3, dashArray: '8 6', interactive: false }).addTo(map);
   const icon = L.divIcon({ className: 'outlet', html: '<span></span>', iconSize: [22, 22] });
@@ -581,7 +821,7 @@ function drawShed() {
   m.on('dragend', () => {
     const p = m.getLatLng(), b = L.latLngBounds([[dem.s, dem.w], [dem.n, dem.e]]).pad(-0.1);
     shed.outlet = p; store.set('shed', [p.lat, p.lng]);
-    computeShed(!b.contains(p));
+    computeShed();
   });
   shed.layers = [img, box, lfp, m];
 }
@@ -625,10 +865,11 @@ $('shedStorm').onclick = () => {
   // Crop to the basin's bounding box (plus a margin) so the simulation grid stays fine.
   let x0 = dem.W, y0 = dem.H, x1 = 0, y1 = 0;
   for (const c of ws.cells) { const x = c % dem.W, y = (c / dem.W) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-  const m = 3; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(dem.W - 1, x1 + m); y1 = Math.min(dem.H - 1, y1 + m);
+  const m = Math.max(3, Math.round(0.15 * Math.max(x1 - x0, y1 - y0))); x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(dem.W - 1, x1 + m); y1 = Math.min(dem.H - 1, y1 + m);
   const W = x1 - x0 + 1, H = y1 - y0 + 1, data = new Float32Array(W * H), mask = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y + y0) * dem.W + x + x0; data[y * W + x] = dem.data[i]; mask[y * W + x] = ws.mask[i]; }
-  openStorm({ data, W, H, dx: dem.dx, dy: dem.dy }, { title: `Storm on the ${(shed.areaM2 * M2_TO_AC).toFixed(0)}-acre drainage area`, mask, depthIn: designDepth(), CN: shed.CN });
+  if (shed.areaM2 * M2_TO_AC < 1) { hint('This drainage area is under an acre, too small to simulate. Drag the outlet onto a bigger channel first.'); return; }
+  openStorm({ data, W, H, dx: dem.dx, dy: dem.dy }, { title: `Storm on the ${(shed.areaM2 * M2_TO_AC).toFixed(0)}-acre drainage area`, mask, depthIn: designDepth(), CN: shed.CN, maxCells: 128 });
 };
 $('shedCsv').onclick = () => shed?.ws && download('drainage-area.csv', toCSV(
   ['outlet_lat', 'outlet_lon', 'area_ac', 'flow_path_ft', 'tc_min', 'cn', 'storm', 'rain_in', 'runoff_in', 'volume_acft', 'peak_cfs'],
@@ -642,7 +883,7 @@ document.querySelectorAll('[data-clear]').forEach((b) => b.addEventListener('cli
     $('profBox').hidden = true; store.set('profile', null);
   }
   if (b.dataset.clear === 'field' && field) {
-    fieldSeq++; field.edit.remove(); if (overlay) map.removeLayer(overlay); overlay = null; field = null;
+    fieldSeq++; field.edit.remove(); if (overlay) map.removeLayer(overlay); overlay = null; clearDesignLayers(); field = null; $('sdBox').hidden = true;
     $('fieldBox').hidden = true; store.set('field', null); renderLegend();
   }
   if (b.dataset.clear === 'shed' && shed) {
@@ -671,4 +912,4 @@ const toLL = (a) => (Array.isArray(a) ? a.filter((p) => Array.isArray(p) && p.le
 }
 
 // Test hook (read-only state + programmatic drawing).
-window.__fg = { map, setField, setProfile, setShed, get shed() { return shed; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };
+window.__fg = { get design() { return design; }, get edits() { return edits; }, addEdit: (t, p) => addEdit(t, p.map(([a, b]) => L.latLng(a, b))), map, setField, setProfile, setShed, get shed() { return shed; }, get flow() { return flow; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };

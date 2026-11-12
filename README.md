@@ -15,6 +15,18 @@ Static files, no build step, no backend.
 - **Field cut & fill**: best-fit plane or your slope and direction, balanced to a cut:fill ratio
   (e.g. 1.20 for shrink). Area, cut/fill yd³, yd³/ac, deepest cut/fill, fall across the field,
   cut/fill map with legend, existing and design CSVs. Warns about lidar gaps and implausibly large cuts.
+- **Site design** (appears once a field is outlined):
+  - **Drainage paths**: where water flows on the field (blue) and where it goes after it leaves (orange), with
+    markers showing the share of the field draining off at each exit. Toggle existing ground / with changes.
+  - **+ Pond**: draw it; set depth below the lowest rim and side slope (H:1). Reports area, bottom elevation,
+    storage (ac-ft) and excavation (yd³).
+  - **+ Raise / lower area** or **Whole field**: raise/lower by a number of feet or set to an elevation.
+  - **+ Drain tile**: draw the line; pick diameter and depth. Reports length, slope, full-flow capacity
+    (Manning n 0.015) and acres served at 3/8 in/day. Outlet at the low end.
+  - Net cut/fill of all changes (import/export yd³).
+  - **Wetlands**: USFWS National Wetlands Inventory polygons on the map, acres of mapped wetland inside the field
+    by type, and a warning when your changes disturb mapped wetland. Screening only, not a delineation.
+  - **Storm 3D with changes**: runs the storm on the changed surface; tile acts as a capacity-limited sink.
 - **Drainage area & peak flow** (press **D**): click a culvert, tile outlet or ditch point. Delineates the
   contributing area from the lidar (depression filling + D8 flow), shows the channel network and the longest
   flow path, and reports area, relief, slopes and time of concentration (NRCS lag and Kirpich). Pick land
@@ -63,6 +75,7 @@ replaced by synthetic lidar of known shape, and checks:
 
 | File | Purpose |
 | --- | --- |
+| `design.js` | Ponds, raise/lower, tile, exit points, wetland overlap on a grid |
 | `hydro.js` | Depression filling, D8 flow, watershed, Tc, TR-55 (runoff, Type II peak), Type II rainfall |
 | `storm.js`, `storm3d.js` | Storm simulation and its three.js viewer |
 | `earthwork.js` | Pure maths: projection, plane fit, volumes, balancing, profile stats, hillshade, CSV |

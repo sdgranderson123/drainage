@@ -104,6 +104,20 @@ table.results th:first-child, table.results td:first-child { text-align: left; }
 table.results th { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .3px; }
 table.results td.peak { font-weight: 700; color: var(--fill); }
 
+h3.sub { font-size: 13px; margin: 14px 0 4px; }
+.row.tight { margin-top: 0; justify-content: space-between; }
+.addbtns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.addbtns .btn[aria-pressed="true"] { background: var(--acc-soft); border-color: var(--acc); }
+ul.edits { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+li.edit { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
+.edhead { display: flex; align-items: center; gap: 6px; } .edhead b { flex: 1; }
+.edhead .sw { width: 12px; height: 12px; border-radius: 3px; }
+.err { color: var(--cut); }
+/* While drawing, markers and shapes must not swallow clicks meant for new points. */
+.drawing .leaflet-marker-icon, .drawing .leaflet-interactive { pointer-events: none !important; }
+.exit span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: #ff8c00; color: #111;
+  font: 700 11px system-ui; border: 2px solid #fff; box-shadow: 0 1px 4px rgb(0 0 0 / .5); }
+
 /* storm viewer */
 body.modal-open { overflow: hidden; }
 .storm { position: fixed; inset: 0; z-index: 5000; background: var(--bg); display: flex; flex-direction: column; }
@@ -120,6 +134,13 @@ body.modal-open { overflow: hidden; }
 .stside .stats { margin-top: 0; }
 
 /* on-map overlays */
+.mapmsg { position: absolute; z-index: 1002; left: 50%; bottom: 76px; transform: translateX(-50%); max-width: min(520px, calc(100% - 24px));
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r); background: var(--card); color: var(--fg);
+  box-shadow: 0 6px 24px rgb(0 0 0 / .3); font-size: 14px; }
+.mapmsg.err { border-left: 4px solid var(--cut); } .mapmsg.info { border-left: 4px solid var(--acc); }
+.mapmsg .spin { width: 16px; height: 16px; flex: none; border: 2.5px solid var(--line); border-top-color: var(--acc); border-radius: 50%; animation: spin .8s linear infinite; }
+.mapmsg:not(.busy) .spin { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .progress { position: absolute; top: 0; left: 0; right: 0; height: 3px; z-index: 1001; overflow: hidden; background: rgb(255 255 255 / .2); }
 .progress div { width: 30%; height: 100%; background: var(--focus); animation: slide 1.1s ease-in-out infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
@@ -150,8 +171,11 @@ body.modal-open { overflow: hidden; }
   #stCanvas { flex: none; height: 48vh; }
   .stside { width: auto; border-left: 0; border-top: 1px solid var(--line); }
   .rp { grid-template-columns: repeat(3, 1fr); }
+  .mapmsg { bottom: 40px; font-size: 13px; }
   .hover { top: 8px; bottom: auto; left: 56px; font-size: 12px; } .legend { bottom: 28px; min-width: 150px; }
-  .drawbar { top: 48px; }
+  .drawbar { top: 44px; padding: 6px 10px; font-size: 13px; }
+  .drawbar .row { margin-top: 4px; } .drawbar .btn { padding: 4px 10px; }
+  #dbHint { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 

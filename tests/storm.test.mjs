@@ -72,3 +72,13 @@ test('basin ridge: drain cells outside a bowl take no water; edges only spill do
   while (r.t < 2.5 * 3600) r.step(10);
   assert.ok(r.balance().out / r.balance().excess > 0.5);
 });
+
+test('drain tile removes ponded water at its capacity and mass still balances', () => {
+  const W = 31, H = 31, z = bowl(W, H), centre = [15 * W + 15, 15 * W + 14, 15 * W + 16];
+  const run = (cap) => { const sim = new StormSim(z, W, H, 5, { depthIn: 5, CN: 90, hours: 2, sinks: cap ? [{ cells: centre, capM3s: cap }] : [] });
+    while (sim.t < 6 * 3600) sim.step(10); return sim; };
+  const none = run(0), tile = run(0.02);
+  assert.ok(tile.stored() < none.stored() * 0.9, `${tile.stored()} vs ${none.stored()}`);
+  assert.ok(tile.tileOut > 0 && tile.tileOut <= 0.02 * 6 * 3600 + 1e-6);
+  const b = tile.balance(); assert.ok(Math.abs(b.error) / b.excess < 0.005, JSON.stringify(b));
+});
