@@ -15,6 +15,16 @@ Static files, no build step, no backend.
 - **Field cut & fill**: best-fit plane or your slope and direction, balanced to a cut:fill ratio
   (e.g. 1.20 for shrink). Area, cut/fill yd³, yd³/ac, deepest cut/fill, fall across the field,
   cut/fill map with legend, existing and design CSVs. Warns about lidar gaps and implausibly large cuts.
+- **Drainage area & peak flow** (press **D**): click a culvert, tile outlet or ditch point. Delineates the
+  contributing area from the lidar (depression filling + D8 flow), shows the channel network and the longest
+  flow path, and reports area, relief, slopes and time of concentration (NRCS lag and Kirpich). Pick land
+  cover and soil group for the curve number, enter NOAA Atlas 14 24-hour depths (link provided; NOAA's
+  service can't be read from the browser), and get TR-55 runoff depth, volume and graphical peak discharge
+  for each storm. Drag the outlet to move it. CSV export. Warns when the basin is cut off by the study area.
+- **Storm 3D** (from a drainage area or a field): 3D terrain with live water during an NRCS Type II 24-hour
+  storm. Curve-number losses, 2D overland flow with Manning friction (virtual-pipe shallow-water scheme),
+  ponding, outflow hydrograph, mass balance. A screening visual, not a design model: no culverts, tile or
+  channel geometry, and cells are coarsened to at most 128 across.
 - **Lidar relief**: colour-shaded bare-earth elevation for the current view (zoom 13+), with legend.
 - Tap/point anywhere for elevation (inside a field it also shows the cut or fill depth there).
 - **Lidar flown**: collection window of the 1 m lidar project at the field or profile, with a warning if older than 5 years.
@@ -41,6 +51,9 @@ replaced by synthetic lidar of known shape, and checks:
   CSV rows satisfy cut_fill = existing − design.
 - **Stability**: lidar gaps produce a warning; a 502 is retried; a persistent outage shows an error
   and clears the busy state.
+- **Engineering**: on a synthetic valley the delineated area is within 4% of the analytic area; the
+  results table matches TR-55 computed independently; the 3D storm runs with WebGL and conserves mass.
+  Unit tests cover filling, D8, basin splits, SCS runoff, Kirpich, Type II tables, friction, rim leakage.
 - **UI**: drawing by mouse and keyboard, double-click without duplicate points, handle dragging,
   chart hover, relief layer, place and coordinate search, session restore.
 - **Standards**: axe-core accessibility scan, no horizontal scroll at phone width, dark mode,
@@ -50,6 +63,8 @@ replaced by synthetic lidar of known shape, and checks:
 
 | File | Purpose |
 | --- | --- |
+| `hydro.js` | Depression filling, D8 flow, watershed, Tc, TR-55 (runoff, Type II peak), Type II rainfall |
+| `storm.js`, `storm3d.js` | Storm simulation and its three.js viewer |
 | `earthwork.js` | Pure maths: projection, plane fit, volumes, balancing, profile stats, hillshade, CSV |
 | `dem.js` | USGS 3DEP access with timeouts, retries and cancellation; Esri place search |
 | `app.js` | Map, drawing/editing, results, overlays |
