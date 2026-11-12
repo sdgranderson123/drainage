@@ -51,6 +51,9 @@
         <button type="button" class="tool" id="bField" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l7-3 9 4-2 11-12 3z"/></svg>
           <span><b>Field cut &amp; fill</b><small>Outline a field, get a design plane</small></span></button>
+        <button type="button" class="tool" id="bShed" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c3 4 6 7 6 11a6 6 0 0 1-12 0c0-4 3-7 6-11z"/><path d="M12 21v-6"/></svg>
+          <span><b>Drainage area &amp; peak flow</b><small>Click a culvert or outlet: basin, Tc, TR-55 peaks</small></span></button>
       </div>
       <label class="switch"><input type="checkbox" id="relief"> <span>Lidar relief on the map</span></label>
       <div id="reliefOpts" class="row" hidden>
@@ -67,7 +70,7 @@
         <li>Pick a tool, then click points on the map. Double-click or press <kbd>Enter</kbd> to finish.</li>
         <li>Drag the white handles to adjust. Results update as you go.</li>
       </ol>
-      <p class="small muted">Keys: <kbd>P</kbd> profile, <kbd>F</kbd> field, <kbd>Backspace</kbd> undo point, <kbd>Esc</kbd> cancel.</p>
+      <p class="small muted">Keys: <kbd>P</kbd> profile, <kbd>F</kbd> field, <kbd>D</kbd> drainage area, <kbd>Backspace</kbd> undo point, <kbd>Esc</kbd> cancel.</p>
     </section>
 
     <section class="card" id="profBox" hidden>
@@ -100,6 +103,31 @@
         <button type="button" class="btn" id="exCsv">Existing CSV</button>
         <button type="button" class="btn" id="deCsv">Design CSV</button>
         <button type="button" class="btn" id="printBtn">Print / PDF</button>
+        <button type="button" class="btn primary" id="fieldStorm">Storm 3D</button>
+      </div>
+    </section>
+
+    <section class="card" id="shedBox" hidden>
+      <div class="cardhead"><h2>Drainage area</h2><button type="button" class="link" data-clear="shed">Remove</button></div>
+      <div class="kpis" id="shedKpis"></div>
+      <div id="shedWarn" class="warn" hidden></div>
+      <dl id="shedStats" class="stats"></dl>
+      <fieldset class="design">
+        <legend>Runoff inputs</legend>
+        <div class="grid2">
+          <label>Study area radius<select id="shedRadius"><option value="500">0.3 mi</option><option value="1000" selected>0.6 mi</option><option value="2000">1.2 mi</option><option value="3200">2 mi</option></select></label>
+          <label>Soil group<select id="hsg"><option value="0">A</option><option value="1" selected>B</option><option value="2">C</option><option value="3">D</option></select></label>
+          <label class="span2">Land cover<select id="landUse"></select></label>
+          <label>Curve number<input id="cn" type="number" min="30" max="98" step="1" value="78" inputmode="numeric"></label>
+          <label>Tc method<select id="tcMethod"><option value="lag">NRCS lag</option><option value="kirpich">Kirpich</option></select></label>
+        </div>
+        <p class="small muted">24-hour rainfall depths, inches (NOAA Atlas 14): <a id="noaaLink" href="https://hdsc.nws.noaa.gov/pfds/" target="_blank" rel="noopener">look up this spot ↗</a></p>
+        <div class="rp" id="rpInputs"></div>
+      </fieldset>
+      <div class="tablewrap"><table class="results" id="shedTable"></table></div>
+      <div class="row">
+        <button type="button" class="btn primary" id="shedStorm">Storm 3D</button>
+        <button type="button" class="btn" id="shedCsv">Download CSV</button>
       </div>
     </section>
 
@@ -108,6 +136,38 @@
   </aside>
 </main>
 
+<div id="storm" class="storm" hidden role="dialog" aria-modal="true" aria-labelledby="stTitle">
+  <div class="sthead">
+    <h2 id="stTitle">Storm simulation</h2>
+    <span class="clock" title="Storm time">⏱ <b id="stClock">00:00</b> h</span>
+    <button type="button" class="btn" id="stClose">Close</button>
+  </div>
+  <div class="stbody">
+    <canvas id="stCanvas" role="img" aria-label="3D view of terrain and water. Drag to rotate, scroll or pinch to zoom."></canvas>
+    <div class="stside">
+      <div class="grid2">
+        <label>24-h rain, in<input id="stDepth" type="number" min="0.5" max="20" step="0.1" value="5"></label>
+        <label>Curve number<input id="stCN" type="number" min="30" max="98" step="1" value="78"></label>
+        <label>Speed<select id="stSpeed"><option value="900">15 min / s</option><option value="1800" selected>30 min / s</option><option value="3600">1 h / s</option></select></label>
+        <label>Vertical ×<input id="stExag" type="range" min="1" max="30" step="1" value="8"></label>
+        <label class="span2">Surface roughness (Manning n)<select id="stN">
+          <option value="0.03">0.03 – bare soil, smooth channel</option>
+          <option value="0.06" selected>0.06 – crop residue, grassed waterway</option>
+          <option value="0.15">0.15 – dense grass, pasture</option>
+          <option value="0.40">0.40 – woods with litter</option></select></label>
+      </div>
+      <label class="switch"><input type="checkbox" id="stShowMax"> <span>Show deepest water reached</span></label>
+      <div class="row"><button type="button" class="btn primary" id="stPlay">Play storm</button><button type="button" class="btn" id="stReset">Reset</button></div>
+      <canvas id="stChart" role="img" aria-label="Rainfall intensity bars and outflow line over 24 hours"></canvas>
+      <p class="small muted legendline"><span class="sw rain"></span>Rain intensity <span class="sw flow"></span>Outflow</p>
+      <dl id="stStats" class="stats"></dl>
+      <p class="small muted">NRCS Type II 24-hour storm, curve-number losses, 2D overland flow with Manning friction on the lidar surface.
+        Screening visual only: no culverts, tile or channels, and coarse cells. Use HEC-RAS 2D or similar for design.</p>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
 <script type="module" src="app.js"></script>

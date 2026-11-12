@@ -177,7 +177,8 @@ console.log('UI: draw by mouse, edit, profile chart, relief, search');
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.busy === 0, null, { timeout: 30000 });
   check(await page.isHidden('#drawbar'), 'Enter finishes and hides the bar');
-  await page.mouse.move(...at(0.5, 0.5)); await page.waitForTimeout(100);
+  const ctr = await page.evaluate(() => { const f = window.__fg.field, m = window.__fg.map, b = window.L.latLngBounds(f.pts).getCenter(), p = m.latLngToContainerPoint(b); return [p.x, p.y]; });
+  await page.mouse.move(box.x + ctr[0], box.y + ctr[1]); await page.waitForTimeout(100);
   check(/ft · (cut|fill) [\d.]+ ft/.test(await page.textContent('#hover')), 'hover inside field shows cut/fill depth', await page.textContent('#hover'));
   await page.emulateMedia({ media: 'print' });
   await page.pdf({ path: path.join(ROOT, 'tests', 'out-report.pdf'), format: 'Letter', printBackground: true });
@@ -227,7 +228,55 @@ console.log('UI: draw by mouse, edit, profile chart, relief, search');
   await page.context().close();
 }
 
-// ---------- 6. phone layout + dark mode ----------
+// ---------- 6. drainage area, TR-55 and 3D storm ----------
+console.log('Engineering: drainage area on a V-shaped valley, TR-55 peaks, 3D storm');
+{
+  // Valley: channel along x = 0 running south (y decreasing), side slopes 2%, long slope 0.5%.
+  // A slight cross-tilt so the two lidar columns either side of the axis merge into one channel; a perfectly
+  // symmetric V gives two parallel D8 channels that never join (an artefact of idealised surfaces).
+  surface = (x, y) => 30 + 0.02 * Math.abs(x) + 0.002 * x + 0.0005 * y;
+  const page = await newPage();
+  await page.evaluate(([a, b]) => window.__fg.setShed(window.L.latLng(a, b)), [LAT0, LON0 + 0.0001]);
+  await page.waitForFunction(() => window.__fg.shed?.ws && window.__fg.busy === 0, null, { timeout: 60000 });
+  const s = await page.evaluate(() => { const sh = window.__fg.shed; return { a: sh.areaM2, L: sh.L, edge: sh.ws.touchesEdge, half: (sh.dem.n - sh.dem.s) / 2, dem: [sh.dem.W, sh.dem.H, sh.dem.dx, sh.dem.dy] }; });
+  // Everything north of the outlet inside the 1 km box drains to it: about 1000 m x 500 m.
+  check(near(s.a, 2000 * 1000, 2000 * 1000 * 0.04), `area ${(s.a / 4046.86).toFixed(1)} ac ≈ ${(2e6 / 4046.86).toFixed(1)} ac (±4%)`, JSON.stringify(s));
+  check(s.edge && /edge of the study area/.test(await page.textContent('#shedWarn')), 'warns that the basin is cut off by the study area');
+  check(s.L > 1000 && s.L < 2100, `longest flow path ${s.L.toFixed(0)} m within 1000–2100 m`);
+  await page.fill('#p100', '7.0'); await page.fill('#p10', '4.5');
+  await page.waitForTimeout(200);
+  const rows = await page.$$eval('#shedTable tbody tr', (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent)));
+  check(rows.length === 2 && rows[1][0] === '100-yr 24-h', 'results table lists entered storms', JSON.stringify(rows));
+  const want = await page.evaluate(async () => {
+    const h = await import('./hydro.js'); const sh = window.__fg.shed;
+    return h.tr55Peak(sh.areaM2 / 4046.86 / 640, 7, sh.CN, sh.Tc).q;
+  });
+  check(near(+rows[1][4].replace(/,/g, ''), want, Math.max(1, want * 0.005)), `100-yr peak ${rows[1][4]} cfs matches TR-55 (${want.toFixed(0)})`);
+  check(near(+rows[1][2], 4.47, 0.02), `100-yr runoff ${rows[1][2]} in (CN 78, 7 in → 4.47 in)`);
+  // 3D storm
+  await page.click('#shedStorm');
+  check(await page.isVisible('#storm'), 'storm viewer opens');
+  await page.selectOption('#stSpeed', '3600');
+  await page.click('#stPlay');
+  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 13 * 3600, null, { timeout: 90000 });
+  const st = await page.evaluate(() => { const c = window.__storm.ctx; const b = c.sim.balance(); let wet = 0; for (const v of c.sim.h) if (v > 0.005) wet++; return { b, wet, peak: Math.max(...c.sim.history.map((r) => r.q)), gl: !!c.renderer.getContext() }; });
+  check(st.gl, 'WebGL context created');
+  check(st.b.excess > 0 && st.wet > 0 && st.peak > 0, `water on the ground (${st.wet} wet cells) and outflow after the storm peak`);
+  check(Math.abs(st.b.error) / st.b.excess < 0.01, `mass balance error ${(100 * Math.abs(st.b.error) / st.b.excess).toFixed(3)}%`);
+  await page.waitForTimeout(400);
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-storm.png') });
+  await page.keyboard.press('Escape');
+  check(await page.isHidden('#storm'), 'Escape closes the viewer');
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-shed.png') });
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.addScriptTag({ path: require.resolve('axe-core') });
+  const axe = await page.evaluate(async () => (await window.axe.run(document, { exclude: [['.leaflet-container']] })).violations.map((v) => `${v.id} (${v.nodes.length})`));
+  check(!axe.length, 'axe-core: no violations with the drainage card open', axe.join(', '));
+  await page.context().close();
+  surface = plane;
+}
+
+// ---------- 7. phone layout + dark mode ----------
 console.log('UI: phone layout, dark mode');
 {
   surface = plane; const page = await newPage({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', isMobile: true, hasTouch: true });
