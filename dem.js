@@ -54,7 +54,7 @@ export async function fetchDEM({ s, n, w, e }, { signal, onProgress, maxPx = MAX
     const [jw, js, je, jn] = j.bb;
     const url = `${SVC}/exportImage?bbox=${jw},${js},${je},${jn}&bboxSR=4326&imageSR=4326&size=${j.tw},${j.th}` +
       '&format=tiff&compression=LZ77&pixelType=F32&noDataInterpretation=esriNoDataMatchAny&interpolation=RSP_BilinearInterpolation&f=image';
-    const r = await robustFetch(url, { signal, tries: 5 });
+    const r = await robustFetch(url, { signal, tries: 4 });
     const buf = await r.arrayBuffer();
     let img;
     try { img = await (await fromArrayBuffer(buf)).getImage(); }

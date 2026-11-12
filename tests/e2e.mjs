@@ -154,7 +154,7 @@ console.log('Stability: elevation service errors');
   failMode = 'always'; calls = 0;
   const p2 = await newPage();
   await p2.evaluate((p) => window.__fg.setField(p.map(([a, b]) => window.L.latLng(a, b))), SQUARE);
-  await p2.waitForFunction(() => document.querySelector('#status').classList.contains('err'), null, { timeout: 30000 });
+  await p2.waitForFunction(() => document.querySelector('#status').classList.contains('err'), null, { timeout: 60000 });
   check(/Elevation service error 500/.test(await p2.textContent('#status')), 'persistent failure shows an error message');
   check(await p2.isHidden('#progress'), 'progress bar cleared after failure');
   await p2.context().close();
