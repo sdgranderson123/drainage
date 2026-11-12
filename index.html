@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Field elevation profiles and cut/fill estimates from USGS 3DEP lidar.">
+<meta name="color-scheme" content="light dark">
+<title>FieldGrade</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a6b4f'/%3E%3Cpath d='M4 22l8-7 5 4 11-10' stroke='%23fff' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"
+  integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="anonymous">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top">
+  <h1 class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M4 22l8-7 5 4 11-10"/></svg><span>FieldGrade</span></h1>
+  <form id="search" class="search" role="search">
+    <label class="sr" for="q">Find a place or coordinates</label>
+    <input id="q" type="search" placeholder="Address, town, or lat, lon" autocomplete="off">
+    <button type="submit" class="btn">Go</button>
+    <button type="button" id="locate" class="btn icon" title="My location" aria-label="Go to my location">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
+  </form>
+</header>
+
+<p class="printhead">FieldGrade report · <span id="printDate"></span></p>
+<main class="app">
+  <div class="mapwrap">
+    <div id="map" role="application" aria-label="Map. Use the tools in the side panel to draw on it."></div>
+    <div id="progress" class="progress" hidden><div></div></div>
+    <div id="drawbar" class="drawbar" hidden role="toolbar" aria-label="Drawing">
+      <div><strong id="dbTitle"></strong> <span id="dbHint"></span></div>
+      <div id="dbMeasure" class="dbm"></div>
+      <div class="row">
+        <button type="button" class="btn" id="bUndo">Undo</button>
+        <button type="button" class="btn" id="bCancel">Cancel</button>
+        <button type="button" class="btn primary" id="bDone">Finish</button>
+      </div>
+    </div>
+    <div id="hover" class="hover" aria-live="off">Point at or tap the map for elevation</div>
+    <div id="legend" class="legend" hidden></div>
+  </div>
+
+  <aside class="panel" aria-label="Tools and results">
+    <section class="card">
+      <h2>Measure</h2>
+      <div class="tools">
+        <button type="button" class="tool" id="bProf" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17l5-6 4 3 8-9"/><path d="M3 21h18"/></svg>
+          <span><b>Elevation profile</b><small>Draw a line, see the fall along it</small></span></button>
+        <button type="button" class="tool" id="bField" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6l7-3 9 4-2 11-12 3z"/></svg>
+          <span><b>Field cut &amp; fill</b><small>Outline a field, get a design plane</small></span></button>
+      </div>
+      <label class="switch"><input type="checkbox" id="relief"> <span>Lidar relief on the map</span></label>
+      <div id="reliefOpts" class="row" hidden>
+        <label for="reliefOpacity" class="small">Opacity</label>
+        <input type="range" id="reliefOpacity" min="0.2" max="1" step="0.05" value="0.85">
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="card" id="intro">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li>Search for a farm or zoom in on the map.</li>
+        <li>Pick a tool, then click points on the map. Double-click or press <kbd>Enter</kbd> to finish.</li>
+        <li>Drag the white handles to adjust. Results update as you go.</li>
+      </ol>
+      <p class="small muted">Keys: <kbd>P</kbd> profile, <kbd>F</kbd> field, <kbd>Backspace</kbd> undo point, <kbd>Esc</kbd> cancel.</p>
+    </section>
+
+    <section class="card" id="profBox" hidden>
+      <div class="cardhead"><h2>Elevation profile</h2><button type="button" class="link" data-clear="profile">Remove</button></div>
+      <canvas id="prof" role="img" aria-label="Elevation profile chart"></canvas>
+      <div id="profTip" class="small muted">Point at the chart to find that spot on the map.</div>
+      <dl id="profStats" class="stats"></dl>
+      <div class="row"><button type="button" class="btn" id="profCsv">Download CSV</button></div>
+    </section>
+
+    <section class="card" id="fieldBox" hidden>
+      <div class="cardhead"><h2>Field cut &amp; fill</h2><button type="button" class="link" data-clear="field">Remove</button></div>
+      <div class="kpis" id="kpis"></div>
+      <div id="fieldWarn" class="warn" hidden></div>
+      <fieldset class="design">
+        <legend>Design plane</legend>
+        <div class="seg" role="radiogroup" aria-label="Plane type">
+          <label><input type="radio" name="mode" value="fit" checked><span>Best fit</span></label>
+          <label><input type="radio" name="mode" value="manual"><span>Set slope</span></label>
+        </div>
+        <div class="grid2">
+          <label>Slope, %<input id="slope" type="number" step="0.01" min="0" max="10" value="0.10" inputmode="decimal"></label>
+          <label>Water runs toward, °<input id="heading" type="number" step="1" min="0" max="359" value="180" inputmode="numeric"></label>
+          <label title="1.20 means 20% more cut than fill, to allow for soil shrink">Cut : fill ratio<input id="ratio" type="number" step="0.05" min="0.5" max="2" value="1.00" inputmode="decimal"></label>
+          <div class="compass" aria-hidden="true"><svg viewBox="0 0 40 40"><circle cx="20" cy="20" r="18"/><text x="20" y="8">N</text><g id="arrow"><path d="M20 30V10M14 24l6 6 6-6"/></g></svg></div>
+        </div>
+      </fieldset>
+      <dl id="fieldStats" class="stats"></dl>
+      <div class="row">
+        <button type="button" class="btn" id="exCsv">Existing CSV</button>
+        <button type="button" class="btn" id="deCsv">Design CSV</button>
+        <button type="button" class="btn" id="printBtn">Print / PDF</button>
+      </div>
+    </section>
+
+    <p class="small muted foot">Elevations: USGS 3DEP bare-earth lidar (NAVD88), US only. Imagery © Esri.
+      Estimates only — check against a survey before bidding or moving dirt.</p>
+  </aside>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"
+  integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
