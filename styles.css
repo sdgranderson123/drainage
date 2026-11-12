@@ -104,6 +104,20 @@ table.results th:first-child, table.results td:first-child { text-align: left; }
 table.results th { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .3px; }
 table.results td.peak { font-weight: 700; color: var(--fill); }
 
+h3.sub { font-size: 13px; margin: 14px 0 4px; }
+.row.tight { margin-top: 0; justify-content: space-between; }
+.addbtns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.addbtns .btn[aria-pressed="true"] { background: var(--acc-soft); border-color: var(--acc); }
+ul.edits { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
+li.edit { border: 1px solid var(--line); border-radius: 8px; padding: 8px; display: grid; gap: 6px; }
+.edhead { display: flex; align-items: center; gap: 6px; } .edhead b { flex: 1; }
+.edhead .sw { width: 12px; height: 12px; border-radius: 3px; }
+.err { color: var(--cut); }
+/* While drawing, markers and shapes must not swallow clicks meant for new points. */
+.drawing .leaflet-marker-icon, .drawing .leaflet-interactive { pointer-events: none !important; }
+.exit span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: #ff8c00; color: #111;
+  font: 700 11px system-ui; border: 2px solid #fff; box-shadow: 0 1px 4px rgb(0 0 0 / .5); }
+
 /* storm viewer */
 body.modal-open { overflow: hidden; }
 .storm { position: fixed; inset: 0; z-index: 5000; background: var(--bg); display: flex; flex-direction: column; }

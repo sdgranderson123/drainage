@@ -55,6 +55,10 @@ async function newPage(opts = {}) {
   page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && page.errors.push(m.text()));
   await page.route('**/arcgisonline.com/**/tile/**', (r) => r.fulfill({ body: PNG, contentType: 'image/png' }));
   await page.route('**/geocode.arcgis.com/**', (r) => r.fulfill({ json: { candidates: [{ address: 'Test Farm, MS', location: { x: LON0, y: LAT0 }, extent: { xmin: LON0 - 0.01, ymin: LAT0 - 0.01, xmax: LON0 + 0.01, ymax: LAT0 + 0.01 } }] } }));
+  // NWI wetlands mock: one emergent wetland covering the NE quarter of the test field.
+  await page.route('**/wetlandsmapservice/**', (r) => r.fulfill({ json: { type: 'FeatureCollection', features: [{ type: 'Feature',
+    properties: { WETLAND_TYPE: 'Freshwater Emergent Wetland', ATTRIBUTE: 'PEM1C', ACRES: 12 },
+    geometry: { type: 'Polygon', coordinates: [[[LON0, LAT0], [LON0 + 0.0024, LAT0], [LON0 + 0.0024, LAT0 + 0.002], [LON0, LAT0 + 0.002], [LON0, LAT0]]] } }] } }));
   await page.route('**/elevation.nationalmap.gov/**', async (r) => {
     const u = r.request().url();
     calls++;
@@ -279,7 +283,7 @@ console.log('Engineering: drainage area on a V-shaped valley, TR-55 peaks, 3D st
   await page.evaluate((p) => window.__fg.setField(p.map(([a, b]) => window.L.latLng(a, b))), SQUARE);
   await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.busy === 0, null, { timeout: 30000 });
   await page.click('#fieldStorm');
-  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 14 * 3600, null, { timeout: 180000 });
+  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 14 * 3600, null, { timeout: 400000 });
   const fs2 = await page.evaluate(() => { const c = window.__storm.ctx; let inside = 0, outsideWet = 0; for (let i = 0; i < c.c.rain.length; i++) { if (c.c.rain[i]) inside++; else if (c.sim.h[i] > 0.003) outsideWet++; } return { inside, total: c.c.rain.length, outsideWet, bal: c.sim.balance() }; });
   check(fs2.inside > 0.3 * fs2.total && fs2.inside < 0.7 * fs2.total, `property is ${(100 * fs2.inside / fs2.total).toFixed(0)}% of the grid (surroundings included)`);
   check(fs2.outsideWet > 0, `water runs off the property (${fs2.outsideWet} wet cells outside it)`);
@@ -294,7 +298,48 @@ console.log('Engineering: drainage area on a V-shaped valley, TR-55 peaks, 3D st
   surface = plane;
 }
 
-// ---------- 7. phone layout + dark mode ----------
+// ---------- 7. site design: flow paths, edits, wetlands, storm with tile ----------
+console.log('Site design: drainage paths, pond, raise/lower, tile, wetlands');
+{
+  surface = plane; const page = await newPage(); await drawField(page);
+  await page.waitForFunction(() => window.__fg.design?.exits && window.__fg.busy === 0, null, { timeout: 60000 });
+  const ex = await page.evaluate(() => { const d = window.__fg.design, f = window.__fg.field; const [la, lo] = [f.dem.n - (((d.exits[0].i / f.dem.W) | 0) + 0.5) / f.dem.H * (f.dem.n - f.dem.s), f.dem.w + ((d.exits[0].i % f.dem.W) + 0.5) / f.dem.W * (f.dem.e - f.dem.w)]; return { la, lo, n: d.exits.length, share: d.exits.reduce((a, e) => a + e.cells, 0) / f.cells.length }; });
+  check(near(ex.share, 1, 1e-9), 'every field cell drains out through some exit');
+  check(ex.la < LAT0 && ex.lo > LON0, `main exit is on the low (SE) side (${ex.la.toFixed(5)}, ${ex.lo.toFixed(5)})`);
+  check(await page.locator('.exit').count() > 0, 'exit markers drawn on the map');
+  // Wetland overlap: NE quarter of a ~49 ac field -> ~12 ac
+  await page.waitForFunction(() => /mapped wetland inside/.test(document.querySelector('#wetResult').textContent), null, { timeout: 20000 });
+  const wt = await page.textContent('#wetResult'), wa = +wt.match(/([\d.]+) ac of mapped wetland/)[1];
+  check(near(wa, 48.9 / 4, 1.0), `wetland overlap ${wa} ac ≈ ${(48.9 / 4).toFixed(1)} ac`);
+  // Raise the whole field 1 ft -> fill = area x 1 ft
+  await page.click('#bWhole');
+  await page.waitForFunction(() => window.__fg.design?.info.length === 1 && window.__fg.busy === 0, null, { timeout: 60000 });
+  const g = await page.evaluate(() => window.__fg.design.info[0]);
+  const expFill = 48.9 * 4046.86 * 0.3048;
+  check(near(g.fillM3, expFill, expFill * 0.03), `raise whole field 1 ft: fill ${Math.round(g.fillM3 * 1.308)} yd³ ≈ ${Math.round(expFill * 1.308)} yd³`);
+  check(/disturb/.test(await page.textContent('#wetResult')), 'warns that changes disturb mapped wetland');
+  await page.click('[data-del="0"]');
+  // Pond in the SE corner, tile across the field
+  await page.evaluate(([a, b]) => window.__fg.addEdit('pond', [[a - 0.0016, b + 0.0012], [a - 0.0016, b + 0.0020], [a - 0.0008, b + 0.0020], [a - 0.0008, b + 0.0012]]), [LAT0, LON0]);
+  await page.evaluate(([a, b]) => window.__fg.addEdit('tile', [[a + 0.0015, b - 0.0018], [a - 0.0012, b + 0.0016]]), [LAT0, LON0]);
+  await page.waitForFunction(() => window.__fg.design?.info.length === 2 && window.__fg.busy === 0, null, { timeout: 60000 });
+  const [pond, tile] = await page.evaluate(() => window.__fg.design.info);
+  check(pond.cells > 0 && pond.storageM3 > 0 && near(pond.rim - pond.bottom, 4 * 0.3048, 1e-4), `pond: 4 ft deep, ${(pond.storageM3 / 1233.48).toFixed(2)} ac-ft storage`);
+  check(tile.capacityCfs > 0 && tile.acresServed > 0, `tile: ${tile.capacityCfs.toFixed(2)} cfs, ~${Math.round(tile.acresServed)} ac`);
+  check(/Pond storage/.test(await page.textContent('#sdStats')), 'summary lists pond storage');
+  await page.click('#sdStorm');
+  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 14 * 3600, null, { timeout: 400000 });
+  const sb = await page.evaluate(() => { const c = window.__storm.ctx; return { b: c.sim.balance(), sinks: c.c.sinks.length }; });
+  check(sb.sinks === 1 && sb.b.tile > 0, `storm uses the tile (${(sb.b.tile / 1233.48).toFixed(2)} ac-ft taken)`);
+  check(Math.abs(sb.b.error) / sb.b.excess < 0.01, 'storm with changes conserves mass');
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-design-storm.png') });
+  await page.keyboard.press('Escape');
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-design.png') });
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
+
+// ---------- 8. phone layout + dark mode ----------
 console.log('UI: phone layout, dark mode');
 {
   surface = plane; const page = await newPage({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', isMobile: true, hasTouch: true });

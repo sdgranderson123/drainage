@@ -21,6 +21,12 @@ export function openStorm(dem, opts = {}) {
       if (cnt * 2 >= f * f) c.rain[y * c.W + x] = 1;
     }
   }
+  // Tile lines: map fine-grid cells onto the coarse simulation grid.
+  c.sinks = (opts.sinks || []).map((k) => {
+    const set = new Set();
+    for (const i of k.cells) { const x = Math.floor((i % dem.W) / c.f), y = Math.floor(((i / dem.W) | 0) / c.f); if (x < c.W && y < c.H) set.add(y * c.W + x); }
+    return { cells: [...set], capM3s: k.capM3s };
+  });
   const root = $('storm');
   root.hidden = false; document.body.classList.add('modal-open');
   $('stTitle').textContent = opts.title || 'Storm simulation';
@@ -52,6 +58,7 @@ export function openStorm(dem, opts = {}) {
     const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 || !c.rain[i - 1] || !c.rain[i + 1] || !c.rain[i - W] || !c.rain[i + W];
     if (edge) { tColor[i * 3] = 1; tColor[i * 3 + 1] = 0.83; tColor[i * 3 + 2] = 0; }
   }
+  for (const k of c.sinks) for (const i of k.cells) { tColor[i * 3] = 0.55; tColor[i * 3 + 1] = 0.2; tColor[i * 3 + 2] = 0.85; } // tile lines
   terrainGeo.setAttribute('color', new THREE.BufferAttribute(tColor, 3));
   const terrain = new THREE.Mesh(terrainGeo, new THREE.MeshLambertMaterial({ vertexColors: true }));
   const wColor = new Float32Array(W * H * 4);
@@ -59,7 +66,7 @@ export function openStorm(dem, opts = {}) {
   const water = new THREE.Mesh(waterGeo, new THREE.MeshPhongMaterial({ vertexColors: true, transparent: true, shininess: 90, specular: 0x88aacc, depthWrite: false }));
   scene.add(terrain, water);
 
-  const sim = new StormSim(c.z, W, H, Math.sqrt(sx * sy), { depthIn: +$('stDepth').value, CN: +$('stCN').value, drain: c.drain, rainMask: c.rain, manning: +$('stN').value });
+  const sim = new StormSim(c.z, W, H, Math.sqrt(sx * sy), { depthIn: +$('stDepth').value, CN: +$('stCN').value, drain: c.drain, rainMask: c.rain, sinks: c.sinks, manning: +$('stN').value });
   ctx = { renderer, scene, camera, controls, terrain, water, c, sim, lo, playing: false, raf: 0, sx, sy, cellArea: sx * sy, opts, dem };
   setExaggeration();
   frameCamera();
@@ -130,7 +137,8 @@ function updateStats() {
     <dt>Rain so far</dt><dd>${rainIn.toFixed(2)} in</dd>
     <dt>Runoff so far</dt><dd>${(b.excess / area / 0.0254).toFixed(2)} in · ${(b.excess * toAcFt).toFixed(1)} ac-ft</dd>
     <dt>${c.rain ? 'Water on the property' : 'Ponded now'}</dt><dd>${((c.rain ? sim.storedInMask() : b.stored) * toAcFt).toFixed(1)} ac-ft</dd>
-    <dt>${c.rain ? 'Ran off the property' : 'Left the area'}</dt><dd>${((c.rain ? b.excess - sim.storedInMask() : b.out) * toAcFt).toFixed(1)} ac-ft</dd>
+    <dt>${c.rain ? 'Ran off the property' : 'Left the area'}</dt><dd>${((c.rain ? b.excess - sim.storedInMask() - b.tile : b.out) * toAcFt).toFixed(1)} ac-ft</dd>
+    ${c.sinks.length ? `<dt>Taken by drain tile</dt><dd>${(b.tile * toAcFt).toFixed(1)} ac-ft</dd>` : ''}
     <dt>Peak outflow</dt><dd>${Math.round(peak * CFS).toLocaleString('en-US')} cfs</dd>
     <dt>Wet / over 6 in deep</dt><dd>${(wet * cellArea / 4046.86).toFixed(1)} / ${(deep * cellArea / 4046.86).toFixed(1)} ac</dd>
     <dt>Deepest water</dt><dd>${(maxd * M_TO_FT).toFixed(2)} ft</dd>
@@ -179,7 +187,7 @@ function loop() {
 function reset() {
   if (!ctx) return;
   const { c, sx, sy } = ctx;
-  ctx.sim = new StormSim(c.z, c.W, c.H, Math.sqrt(sx * sy), { depthIn: +$('stDepth').value || 5, CN: Math.min(98, Math.max(30, +$('stCN').value || 78)), drain: c.drain, rainMask: c.rain, manning: +$('stN').value || 0.06 });
+  ctx.sim = new StormSim(c.z, c.W, c.H, Math.sqrt(sx * sy), { depthIn: +$('stDepth').value || 5, CN: Math.min(98, Math.max(30, +$('stCN').value || 78)), drain: c.drain, rainMask: c.rain, sinks: c.sinks, manning: +$('stN').value || 0.06 });
   updateWater(); updateStats(); drawChart();
 }
 export function closeStorm() {

@@ -10,7 +10,7 @@ export class StormSim {
   // bed: ground elevations (m); NaN = no data. drain (optional Uint8Array): cells outside the study area.
   // Drain and no-data cells remove any water that reaches them, but water only flows into them where the
   // ground falls that way (they keep their real elevation; no-data takes its neighbours' level).
-  constructor(bed, W, H, dx, { depthIn = 5, CN = 78, hours = 24, distribution = 'typeII', manning = 0.035, drain = null, rainMask = null } = {}) {
+  constructor(bed, W, H, dx, { depthIn = 5, CN = 78, hours = 24, distribution = 'typeII', manning = 0.035, drain = null, rainMask = null, sinks = [] } = {}) {
     Object.assign(this, { W, H, dx, depthIn, CN, hours, distribution, manning });
     const n = W * H;
     this.b = Float32Array.from(bed);
@@ -21,6 +21,8 @@ export class StormSim {
     this.wet = new Uint8Array(n);
     this.active = 0; for (let i = 0; i < n; i++) if (!this.hole[i] && (!rainMask || rainMask[i])) { this.wet[i] = 1; this.active++; }
     this.rainMask = rainMask;
+    // Drain tile / intakes: each sink removes up to capM3s (m³/s) from its cells, taking what is there.
+    this.sinks = sinks.filter((k) => k.cells?.length && k.capM3s > 0); this.tileOut = 0;
     this.h = new Float32Array(n);
     this.fx = new Float32Array(n); this.fxl = new Float32Array(n); // flux to right / to left neighbour (m³/s)
     this.fy = new Float32Array(n); this.fyu = new Float32Array(n); // flux down (row+1) / up (row-1)
@@ -48,16 +50,18 @@ export class StormSim {
     if (add > 0) { const wet = this.wet; for (let i = 0; i < h.length; i++) if (wet[i]) h[i] += add; }
     // Flux update. Outside the grid: free outfall at own bed level.
     const k = dt * G * dx, n2 = this.manning * this.manning;
-    // Semi-implicit Manning friction on each pipe: f /= 1 + dt·g·n²·|v| / h^(4/3), with v = f / (h·dx).
-    const fric = (f, h1) => { const hh = Math.max(h1, 1e-3), v = f / (hh * dx); return 1 / (1 + dt * G * n2 * v / hh ** (4 / 3)); };
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const i = y * W + x, s = b[i] + h[i];
+      const i = y * W + x, hi = h[i];
+      if (hi <= 0) { fx[i] = fxl[i] = fy[i] = fyu[i] = 0; continue; } // dry: nothing to send
+      const s = b[i] + hi;
       // Off-grid neighbours: the ground slope carried on outward (free outfall only where land falls out).
       const R = x < W - 1 ? b[i + 1] + h[i + 1] : 2 * b[i] - b[i - 1], Lh = x > 0 ? b[i - 1] + h[i - 1] : 2 * b[i] - b[i + 1];
       const D = y < H - 1 ? b[i + W] + h[i + W] : 2 * b[i] - b[i - W], U = y > 0 ? b[i - W] + h[i - W] : 2 * b[i] - b[i + W];
-      const hi = h[i];
-      let r = Math.max(0, (fx[i] + k * (s - R)) * fric(fx[i], hi)), l = Math.max(0, (fxl[i] + k * (s - Lh)) * fric(fxl[i], hi));
-      let d = Math.max(0, (fy[i] + k * (s - D)) * fric(fy[i], hi)), u = Math.max(0, (fyu[i] + k * (s - U)) * fric(fyu[i], hi));
+      // Semi-implicit Manning friction: f /= 1 + dt·g·n²·|v| / h^(4/3), v = f / (h·dx). One power per cell.
+      const hh = hi > 1e-3 ? hi : 1e-3, cf = (dt * G * n2) / (hh * dx * Math.pow(hh, 4 / 3));
+      let r = (fx[i] + k * (s - R)) / (1 + cf * fx[i]), l = (fxl[i] + k * (s - Lh)) / (1 + cf * fxl[i]);
+      let d = (fy[i] + k * (s - D)) / (1 + cf * fy[i]), u = (fyu[i] + k * (s - U)) / (1 + cf * fyu[i]);
+      if (r < 0) r = 0; if (l < 0) l = 0; if (d < 0) d = 0; if (u < 0) u = 0;
       const tot = (r + l + d + u) * dt, vol = h[i] * A;
       if (tot > vol && tot > 0) { const sc = vol / tot; r *= sc; l *= sc; d *= sc; u *= sc; }
       fx[i] = r; fxl[i] = l; fy[i] = d; fyu[i] = u;
@@ -73,6 +77,13 @@ export class StormSim {
       h[i] = Math.max(0, h[i] + (inflow - outflow) * dt / A);
       if (hole[i]) { out += h[i] * A; h[i] = 0; } // no-data cells act as drains (water bodies, voids)
       if (h[i] > this.maxH[i]) this.maxH[i] = h[i];
+    }
+    for (const k of this.sinks) {
+      let avail = 0; for (const i of k.cells) avail += h[i];
+      avail *= A; if (avail <= 0) continue;
+      const take = Math.min(avail, k.capM3s * dt), f = take / avail;
+      for (const i of k.cells) h[i] -= h[i] * f;
+      this.tileOut += take;
     }
     this.out += out; this.t += dt;
     if (this.t - this._lastT >= 300 || this.history.length === 0) {
@@ -91,7 +102,7 @@ export class StormSim {
   }
   // Water volume (m³) currently inside the rain mask.
   storedInMask() { if (!this.rainMask) return this.stored(); let s = 0; for (let i = 0; i < this.h.length; i++) if (this.rainMask[i]) s += this.h[i]; return s * this.dx * this.dx; }
-  balance() { const s = this.stored(); return { rain: this.rain, excess: this.excess, stored: s, out: this.out, error: this.excess - s - this.out }; }
+  balance() { const s = this.stored(); return { rain: this.rain, excess: this.excess, stored: s, out: this.out, tile: this.tileOut, error: this.excess - s - this.out - this.tileOut }; }
 }
 
 // Give no-data cells the mean of their valid neighbours (repeated until filled) so they have a ground level.

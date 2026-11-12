@@ -7,7 +7,7 @@ export const MAX_PX = 1500;            // max grid size per side
 export const valid = (z) => Number.isFinite(z) && z > -500 && z < 9000;
 
 // fetch with timeout + retry on network errors and 429/5xx (USGS often returns 502/504 under load).
-export async function robustFetch(url, { signal, timeout = 45000, tries = 3 } = {}) {
+export async function robustFetch(url, { signal, timeout = 45000, tries = 3, name = 'USGS elevation service' } = {}) {
   let last;
   for (let k = 0; k < tries; k++) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -21,8 +21,8 @@ export async function robustFetch(url, { signal, timeout = 45000, tries = 3 } = 
       if (r.status !== 429 && r.status < 500) throw last;
     } catch (e) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      last = e.name === 'AbortError' ? new Error('The USGS elevation service timed out. It is often slow; try again in a minute.')
-        : e instanceof TypeError ? new Error('Could not reach the USGS elevation service (it is busy or down). Try again in a minute.') : e;
+      last = e.name === 'AbortError' ? new Error(`The ${name} timed out. It is often slow; try again in a minute.`)
+        : e instanceof TypeError ? new Error(`Could not reach the ${name} (it is busy or down). Try again in a minute.`) : e;
       if (/error 4\d\d/.test(last.message) && !/429/.test(last.message)) throw last;
     } finally { clearTimeout(t); signal?.removeEventListener('abort', onAbort); }
     await new Promise((res) => setTimeout(res, 1000 * 2 ** k + Math.random() * 500));
