@@ -120,6 +120,13 @@ body.modal-open { overflow: hidden; }
 .stside .stats { margin-top: 0; }
 
 /* on-map overlays */
+.mapmsg { position: absolute; z-index: 1002; left: 50%; bottom: 76px; transform: translateX(-50%); max-width: min(520px, calc(100% - 24px));
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r); background: var(--card); color: var(--fg);
+  box-shadow: 0 6px 24px rgb(0 0 0 / .3); font-size: 14px; }
+.mapmsg.err { border-left: 4px solid var(--cut); } .mapmsg.info { border-left: 4px solid var(--acc); }
+.mapmsg .spin { width: 16px; height: 16px; flex: none; border: 2.5px solid var(--line); border-top-color: var(--acc); border-radius: 50%; animation: spin .8s linear infinite; }
+.mapmsg:not(.busy) .spin { display: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .progress { position: absolute; top: 0; left: 0; right: 0; height: 3px; z-index: 1001; overflow: hidden; background: rgb(255 255 255 / .2); }
 .progress div { width: 30%; height: 100%; background: var(--focus); animation: slide 1.1s ease-in-out infinite; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
@@ -150,8 +157,11 @@ body.modal-open { overflow: hidden; }
   #stCanvas { flex: none; height: 48vh; }
   .stside { width: auto; border-left: 0; border-top: 1px solid var(--line); }
   .rp { grid-template-columns: repeat(3, 1fr); }
+  .mapmsg { bottom: 40px; font-size: 13px; }
   .hover { top: 8px; bottom: auto; left: 56px; font-size: 12px; } .legend { bottom: 28px; min-width: 150px; }
-  .drawbar { top: 48px; }
+  .drawbar { top: 44px; padding: 6px 10px; font-size: 13px; }
+  .drawbar .row { margin-top: 4px; } .drawbar .btn { padding: 4px 10px; }
+  #dbHint { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 

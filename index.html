@@ -37,6 +37,11 @@
         <button type="button" class="btn primary" id="bDone">Finish</button>
       </div>
     </div>
+    <div id="mapmsg" class="mapmsg" hidden role="status" aria-live="polite">
+      <span class="spin" aria-hidden="true"></span><span id="mapmsgText"></span>
+      <button type="button" class="btn" id="mapmsgRetry" hidden>Retry</button>
+      <button type="button" class="link" id="mapmsgClose" aria-label="Dismiss message">✕</button>
+    </div>
     <div id="hover" class="hover" aria-live="off">Point at or tap the map for elevation</div>
     <div id="legend" class="legend" hidden></div>
   </div>
@@ -148,7 +153,7 @@
       <div class="grid2">
         <label>24-h rain, in<input id="stDepth" type="number" min="0.5" max="20" step="0.1" value="5"></label>
         <label>Curve number<input id="stCN" type="number" min="30" max="98" step="1" value="78"></label>
-        <label>Speed<select id="stSpeed"><option value="900">15 min / s</option><option value="1800" selected>30 min / s</option><option value="3600">1 h / s</option></select></label>
+        <label>Speed<select id="stSpeed"><option value="900">15 min / s</option><option value="1800">30 min / s</option><option value="3600" selected>1 h / s</option><option value="7200">2 h / s</option></select></label>
         <label>Vertical ×<input id="stExag" type="range" min="1" max="30" step="1" value="8"></label>
         <label class="span2">Surface roughness (Manning n)<select id="stN">
           <option value="0.03">0.03 – bare soil, smooth channel</option>

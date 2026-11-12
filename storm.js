@@ -10,14 +10,17 @@ export class StormSim {
   // bed: ground elevations (m); NaN = no data. drain (optional Uint8Array): cells outside the study area.
   // Drain and no-data cells remove any water that reaches them, but water only flows into them where the
   // ground falls that way (they keep their real elevation; no-data takes its neighbours' level).
-  constructor(bed, W, H, dx, { depthIn = 5, CN = 78, hours = 24, distribution = 'typeII', manning = 0.035, drain = null } = {}) {
+  constructor(bed, W, H, dx, { depthIn = 5, CN = 78, hours = 24, distribution = 'typeII', manning = 0.035, drain = null, rainMask = null } = {}) {
     Object.assign(this, { W, H, dx, depthIn, CN, hours, distribution, manning });
     const n = W * H;
     this.b = Float32Array.from(bed);
     this.hole = new Uint8Array(n);
     for (let i = 0; i < n; i++) if (!Number.isFinite(bed[i]) || (drain && drain[i])) this.hole[i] = 1;
     fillGaps(this.b, W, H);
-    this.active = 0; for (let i = 0; i < n; i++) if (!this.hole[i]) this.active++;
+    // Rain falls on active cells: not drains, and inside rainMask when one is given (e.g. just the property).
+    this.wet = new Uint8Array(n);
+    this.active = 0; for (let i = 0; i < n; i++) if (!this.hole[i] && (!rainMask || rainMask[i])) { this.wet[i] = 1; this.active++; }
+    this.rainMask = rainMask;
     this.h = new Float32Array(n);
     this.fx = new Float32Array(n); this.fxl = new Float32Array(n); // flux to right / to left neighbour (m³/s)
     this.fy = new Float32Array(n); this.fyu = new Float32Array(n); // flux down (row+1) / up (row-1)
@@ -42,7 +45,7 @@ export class StormSim {
     // Rain only on active cells: no-data / outside-area cells are drains and must not add flow.
     this.rain += (this.cumRainM(this.t + dt) - this.cumRainM(this.t)) * A * this.active;
     this.excess += add * A * this.active;
-    if (add > 0) for (let i = 0; i < h.length; i++) if (!hole[i]) h[i] += add;
+    if (add > 0) { const wet = this.wet; for (let i = 0; i < h.length; i++) if (wet[i]) h[i] += add; }
     // Flux update. Outside the grid: free outfall at own bed level.
     const k = dt * G * dx, n2 = this.manning * this.manning;
     // Semi-implicit Manning friction on each pipe: f /= 1 + dt·g·n²·|v| / h^(4/3), with v = f / (h·dx).
@@ -86,6 +89,8 @@ export class StormSim {
     while (this.t < tEnd && globalThis.performance.now() - t0 < budgetMs) this.step();
     return this.t >= tEnd;
   }
+  // Water volume (m³) currently inside the rain mask.
+  storedInMask() { if (!this.rainMask) return this.stored(); let s = 0; for (let i = 0; i < this.h.length; i++) if (this.rainMask[i]) s += this.h[i]; return s * this.dx * this.dx; }
   balance() { const s = this.stored(); return { rain: this.rain, excess: this.excess, stored: s, out: this.out, error: this.excess - s - this.out }; }
 }
 

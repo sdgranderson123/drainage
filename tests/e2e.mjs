@@ -165,6 +165,10 @@ console.log('Stability: elevation service errors');
 console.log('UI: draw by mouse, edit, profile chart, relief, search');
 {
   surface = plane; const page = await newPage();
+  await page.click('#bShed');
+  await page.waitForFunction(() => /blue channel/.test(document.querySelector('#mapmsgText')?.textContent || ''), null, { timeout: 60000 });
+  check(true, 'drainage tool loads channels first and says where to click');
+  await page.keyboard.press('Escape');
   await page.click('#bField');
   check(await page.isVisible('#drawbar'), 'drawing bar appears');
   const box = await page.locator('#map').boundingBox();
@@ -238,11 +242,14 @@ console.log('Engineering: drainage area on a V-shaped valley, TR-55 peaks, 3D st
   const page = await newPage();
   await page.evaluate(([a, b]) => window.__fg.setShed(window.L.latLng(a, b)), [LAT0, LON0 + 0.0001]);
   await page.waitForFunction(() => window.__fg.shed?.ws && window.__fg.busy === 0, null, { timeout: 60000 });
-  const s = await page.evaluate(() => { const sh = window.__fg.shed; return { a: sh.areaM2, L: sh.L, edge: sh.ws.touchesEdge, half: (sh.dem.n - sh.dem.s) / 2, dem: [sh.dem.W, sh.dem.H, sh.dem.dx, sh.dem.dy] }; });
-  // Everything north of the outlet inside the 1 km box drains to it: about 1000 m x 500 m.
-  check(near(s.a, 2000 * 1000, 2000 * 1000 * 0.04), `area ${(s.a / 4046.86).toFixed(1)} ac ≈ ${(2e6 / 4046.86).toFixed(1)} ac (±4%)`, JSON.stringify(s));
+  const s = await page.evaluate(() => { const sh = window.__fg.shed, d = sh.dem; return { a: sh.areaM2, L: sh.L, edge: sh.ws.touchesEdge, w: d.W * d.dx, h: d.H * d.dy, cy: (d.n - window.__fg.shed.snapped.lat) / (d.n - d.s) }; });
+  // The valley never ends, so the area grows to its limit (~3.2 km half-width) and stays cut off.
+  // Everything upstream (north) of the outlet inside the final box drains to it.
+  const expectA = s.w * s.h * s.cy;
+  check(s.w > 6000, `study area grew automatically to ${(s.w / 1000).toFixed(1)} km`);
+  check(near(s.a, expectA, expectA * 0.04), `area ${(s.a / 4046.86).toFixed(0)} ac ≈ ${(expectA / 4046.86).toFixed(0)} ac (±4%)`, JSON.stringify(s));
   check(s.edge && /edge of the study area/.test(await page.textContent('#shedWarn')), 'warns that the basin is cut off by the study area');
-  check(s.L > 1000 && s.L < 2100, `longest flow path ${s.L.toFixed(0)} m within 1000–2100 m`);
+  check(s.L > s.h * s.cy * 0.9, `longest flow path ${s.L.toFixed(0)} m reaches the far edge`);
   await page.fill('#p100', '7.0'); await page.fill('#p10', '4.5');
   await page.waitForTimeout(200);
   const rows = await page.$$eval('#shedTable tbody tr', (trs) => trs.map((tr) => [...tr.children].map((td) => td.textContent)));
@@ -256,9 +263,8 @@ console.log('Engineering: drainage area on a V-shaped valley, TR-55 peaks, 3D st
   // 3D storm
   await page.click('#shedStorm');
   check(await page.isVisible('#storm'), 'storm viewer opens');
-  await page.selectOption('#stSpeed', '3600');
-  await page.click('#stPlay');
-  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 13 * 3600, null, { timeout: 90000 });
+  check(await page.evaluate(() => window.__storm.ctx?.playing), 'storm starts playing by itself');
+  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 13 * 3600, null, { timeout: 180000 });
   const st = await page.evaluate(() => { const c = window.__storm.ctx; const b = c.sim.balance(); let wet = 0; for (const v of c.sim.h) if (v > 0.005) wet++; return { b, wet, peak: Math.max(...c.sim.history.map((r) => r.q)), gl: !!c.renderer.getContext() }; });
   check(st.gl, 'WebGL context created');
   check(st.b.excess > 0 && st.wet > 0 && st.peak > 0, `water on the ground (${st.wet} wet cells) and outflow after the storm peak`);
@@ -268,6 +274,18 @@ console.log('Engineering: drainage area on a V-shaped valley, TR-55 peaks, 3D st
   await page.keyboard.press('Escape');
   check(await page.isHidden('#storm'), 'Escape closes the viewer');
   await page.screenshot({ path: path.join(ROOT, 'tests', 'out-shed.png') });
+  // Field storm: property plus surroundings, rain only on the property.
+  surface = plane;
+  await page.evaluate((p) => window.__fg.setField(p.map(([a, b]) => window.L.latLng(a, b))), SQUARE);
+  await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.busy === 0, null, { timeout: 30000 });
+  await page.click('#fieldStorm');
+  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 14 * 3600, null, { timeout: 180000 });
+  const fs2 = await page.evaluate(() => { const c = window.__storm.ctx; let inside = 0, outsideWet = 0; for (let i = 0; i < c.c.rain.length; i++) { if (c.c.rain[i]) inside++; else if (c.sim.h[i] > 0.003) outsideWet++; } return { inside, total: c.c.rain.length, outsideWet, bal: c.sim.balance() }; });
+  check(fs2.inside > 0.3 * fs2.total && fs2.inside < 0.7 * fs2.total, `property is ${(100 * fs2.inside / fs2.total).toFixed(0)}% of the grid (surroundings included)`);
+  check(fs2.outsideWet > 0, `water runs off the property (${fs2.outsideWet} wet cells outside it)`);
+  check(Math.abs(fs2.bal.error) / fs2.bal.excess < 0.01, 'field storm conserves mass');
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-field-storm.png') });
+  await page.keyboard.press('Escape');
   check(!page.errors.length, 'no console errors', page.errors.join(' | '));
   await page.addScriptTag({ path: require.resolve('axe-core') });
   const axe = await page.evaluate(async () => (await window.axe.run(document, { exclude: [['.leaflet-container']] })).violations.map((v) => `${v.id} (${v.nodes.length})`));

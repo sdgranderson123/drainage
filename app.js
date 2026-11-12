@@ -33,13 +33,29 @@ map.on('moveend', () => { const c = map.getCenter(); store.set('view', { lat: c.
 
 // ---------------- status / busy ----------------
 let busy = 0;
-function status(msg, err = false) { $('status').textContent = msg || ''; $('status').classList.toggle('err', !!err); }
-async function withBusy(fn) {
-  busy++; $('progress').hidden = false;
-  try { return await fn(); }
-  catch (e) { if (e.name !== 'AbortError') { status(e.message || String(e), true); console.error(e); } }
-  finally { if (--busy === 0) $('progress').hidden = true; }
+// Status shows in the panel and, while working or on error, in a card on the map where the user is looking.
+let lastAction = null;
+function status(msg, err = false) {
+  $('status').textContent = msg || ''; $('status').classList.toggle('err', !!err);
+  if (busy && msg && !err) showMapMsg(msg, 'busy');
 }
+function showMapMsg(msg, kind) {
+  const el = $('mapmsg');
+  if (!msg) { el.hidden = true; return; }
+  el.hidden = false; el.className = `mapmsg ${kind}`;
+  $('mapmsgText').textContent = msg;
+  $('mapmsgRetry').hidden = kind !== 'err' || !lastAction;
+}
+$('mapmsgClose').onclick = () => showMapMsg('');
+$('mapmsgRetry').onclick = () => { const a = lastAction; showMapMsg(''); a?.(); };
+async function withBusy(fn, retry) {
+  busy++; $('progress').hidden = false; showMapMsg('Working…', 'busy');
+  if (retry) lastAction = retry;
+  try { const r = await fn(); return r; }
+  catch (e) { if (e.name !== 'AbortError') { status(e.message || String(e), true); showMapMsg(e.message || String(e), 'err'); console.error(e); } }
+  finally { if (--busy === 0) { $('progress').hidden = true; if (!$('mapmsg').classList.contains('err') && !$('mapmsg').classList.contains('info')) showMapMsg(''); } }
+}
+function hint(msg) { showMapMsg(msg, 'info'); }
 
 // ---------------- search / locate ----------------
 $('search').addEventListener('submit', (e) => {
@@ -192,6 +208,8 @@ function startDraw(mode) {
   $(TOOL[mode].btn).setAttribute('aria-pressed', 'true');
   $('dbTitle').textContent = TOOL[mode].title; $('dbHint').textContent = TOOL[mode].hint;
   $('drawbar').hidden = false; map.getContainer().style.cursor = 'crosshair';
+  $('bUndo').hidden = $('bDone').hidden = mode === 'shed';
+  if (mode === 'shed') showChannels();
   updateDraw();
 }
 function cancelDraw() {
@@ -207,7 +225,7 @@ function areaOf(pts) {
   return polygonArea(pts.map((p) => { const q = toLocal(p.lat, p.lng, lat0, lon0); return [q.x, q.y]; }));
 }
 function measureText(mode, pts) {
-  if (mode === 'shed') return 'One click places the outlet. It snaps to the nearest channel within 160 ft; drag it afterwards to adjust.';
+  if (mode === 'shed') return 'Tap the culvert or channel. It snaps to the nearest blue channel.';
   if (mode === 'profile') return pts.length > 1 ? `${pts.length} points · ${fmt(pathLength(pts) * M_TO_FT)} ft` : `${pts.length} point${pts.length === 1 ? '' : 's'}`;
   return pts.length > 2 ? `${pts.length} corners · ${(areaOf(pts) * M2_TO_AC).toFixed(2)} ac` : `${pts.length} corner${pts.length === 1 ? '' : 's'}`;
 }
@@ -479,10 +497,21 @@ $('printBtn').onclick = () => {
   setTimeout(() => window.print(), 400);
 };
 $('fieldStorm').onclick = () => {
-  if (!field?.dem) return;
-  const { dem, cells } = field, mask = new Uint8Array(dem.W * dem.H);
-  for (const c of cells) mask[c.j * dem.W + c.i] = 1;
-  openStorm(dem, { title: 'Storm on the field', mask, depthIn: designDepth(), CN: +$('cn').value || 78 });
+  if (!field?.pts) return;
+  // Load the property plus surroundings so the run shows where water goes after it leaves.
+  const bb = L.latLngBounds(field.pts).pad(0.35);
+  withBusy(async () => {
+    const dem = await fetchDEM({ s: bb.getSouth(), n: bb.getNorth(), w: bb.getWest(), e: bb.getEast() }, { onProgress: (m) => status(m), maxPx: 700 });
+    const lat0 = (dem.s + dem.n) / 2, lon0 = (dem.w + dem.e) / 2;
+    const P = field.pts.map((p) => { const q = toLocal(p.lat, p.lng, lat0, lon0); return [q.x, q.y]; });
+    const mask = new Uint8Array(dem.W * dem.H);
+    for (let j = 0; j < dem.H; j++) for (let i = 0; i < dem.W; i++) {
+      const q = toLocal(dem.n - (j + 0.5) * (dem.n - dem.s) / dem.H, dem.w + (i + 0.5) * (dem.e - dem.w) / dem.W, lat0, lon0);
+      if (pointInPolygon(q.x, q.y, P)) mask[j * dem.W + i] = 1;
+    }
+    status('');
+    openStorm(dem, { title: `Storm on the ${(field.area * M2_TO_AC).toFixed(0)}-acre property`, mask, depthIn: designDepth(), CN: +$('cn').value || 78, maxCells: 160 });
+  }, () => $('fieldStorm').click());
 };
 $('exCsv').onclick = () => field?.cells && download('field-existing.csv', toCSV(['lat', 'lon', 'elev_ft'],
   field.cells.map((p) => [p.lat.toFixed(7), p.lon.toFixed(7), ft(p.z, 3)])));
@@ -506,66 +535,41 @@ let shed = null, shedSeq = 0;
     const r = {}; RP.forEach((k) => { const v = parseFloat($(`p${k}`).value); if (Number.isFinite(v)) r[k] = v; });
     store.set('rain', r); shedResults();
   }));
-  $('shedRadius').onchange = () => shed && computeShed(true);
+  $('shedRadius').onchange = () => { if (shed) { flow = null; computeShed(); } };
 }
 function designDepth() { for (const y of [100, 50, 25, 10, 2]) { const v = parseFloat($(`p${y}`).value); if (Number.isFinite(v)) return v; } return 5; }
 
-function setShed(ll) {
-  if (shed) shed.layers.forEach((l) => map.removeLayer(l));
-  shed = { outlet: ll, layers: [] };
-  store.set('shed', [ll.lat, ll.lng]);
-  $('intro').hidden = true;
-  $('noaaLink').href = `https://hdsc.nws.noaa.gov/pfds/pfds_map_cont.html?lat=${ll.lat.toFixed(4)}&lon=${ll.lng.toFixed(4)}`;
-  computeShed(true);
+// Flow grid (filled DEM, D8 receivers, accumulation) for an area; reused across clicks.
+let flow = null, chanLayer = null, flowSeq = 0;
+async function buildFlow(bounds, onProgress) {
+  const dem = await fetchDEM(bounds, { onProgress });
+  onProgress('Tracing where water flows…');
+  await new Promise((r) => setTimeout(r, 30));
+  const f = fillDepressions(dem.data, dem.W, dem.H), rec = d8(f, dem.W, dem.H, dem.dx, dem.dy), acc = accumulate(rec, dem.W * dem.H);
+  return { dem, rec, acc, bounds: L.latLngBounds([[dem.s, dem.w], [dem.n, dem.e]]) };
 }
-function computeShed(refetch) {
-  const seq = ++shedSeq, ll = shed.outlet, R = +$('shedRadius').value;
+// Show the channel network for the current view so the user can see where to click.
+function showChannels() {
+  const z = map.getZoom();
+  if (z < 13) { hint('Zoom in closer (to a few miles across), then pick the tool again to see the drainage channels.'); return; }
+  const v = map.getBounds();
+  if (flow && flow.bounds.contains(v)) { drawChannels(); hint('Click a blue channel at the culvert or outlet you want to size.'); return; }
+  const seq = ++flowSeq, pb = v.pad(0.1);
   withBusy(async () => {
-    if (refetch || !shed.dem) {
-      const dLat = R / 111320, dLon = R / (111320 * Math.cos(ll.lat * Math.PI / 180));
-      const dem = await fetchDEM({ s: ll.lat - dLat, n: ll.lat + dLat, w: ll.lng - dLon, e: ll.lng + dLon }, { onProgress: (m) => status(m) });
-      if (seq !== shedSeq) return;
-      status('Tracing flow paths…');
-      await new Promise((r) => setTimeout(r, 20));
-      const f = fillDepressions(dem.data, dem.W, dem.H), rec = d8(f, dem.W, dem.H, dem.dx, dem.dy), acc = accumulate(rec, dem.W * dem.H);
-      Object.assign(shed, { dem, rec, acc });
-    }
-    const { dem, rec, acc } = shed;
-    const px = Math.floor(((ll.lng - dem.w) / (dem.e - dem.w)) * dem.W), py = Math.floor(((dem.n - ll.lat) / (dem.n - dem.s)) * dem.H);
-    if (px < 0 || py < 0 || px >= dem.W || py >= dem.H) throw new Error('Outlet is outside the lidar area.');
-    // Snap to the strongest flow line within 50 ft; if that isn't a real channel (2+ acres), look out to 160 ft.
-    const chan = (2 * 4046.86) / (dem.dx * dem.dy);
-    let out = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(1, Math.round(15 / dem.dx)));
-    if (acc[out] < chan) { const far = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(2, Math.round(50 / dem.dx))); if (acc[far] >= chan) out = far; }
-    const ws = watershed(rec, dem.W, dem.H, out, dem.dx, dem.dy);
-    const cellA = dem.dx * dem.dy, areaM2 = ws.cells.length * cellA;
-    const path = flowPath(rec, ws.far, out);
-    const zOut = dem.data[out], zTop = dem.data[ws.far], pathLen = ws.len[ws.far];
-    // Average land slope over the basin (central differences on the unfilled surface).
-    let ss = 0, sn = 0;
-    for (const c of ws.cells) {
-      const x = c % dem.W, y = (c / dem.W) | 0; if (x < 1 || y < 1 || x >= dem.W - 1 || y >= dem.H - 1) continue;
-      const gx = (dem.data[c + 1] - dem.data[c - 1]) / (2 * dem.dx), gy = (dem.data[c + dem.W] - dem.data[c - dem.W]) / (2 * dem.dy);
-      if (Number.isFinite(gx) && Number.isFinite(gy)) { ss += Math.hypot(gx, gy); sn++; }
-    }
-    const idxLL = (i) => [dem.n - ((((i / dem.W) | 0) + 0.5) / dem.H) * (dem.n - dem.s), dem.w + (((i % dem.W) + 0.5) / dem.W) * (dem.e - dem.w)];
-    Object.assign(shed, { ws, out, areaM2, L: pathLen, relief: zTop - zOut, pathSlope: pathLen > 0 ? (zTop - zOut) / pathLen : 0, basinSlope: sn ? ss / sn : 0,
-      snapped: L.latLng(...idxLL(out)), pathLL: path.filter((_, k) => k % 3 === 0 || k === path.length - 1).map(idxLL) });
-    if (seq !== shedSeq) return;
-    drawShed(); shedResults(); $('shedBox').hidden = false; status('');
-  });
+    const fl = await buildFlow({ s: pb.getSouth(), n: pb.getNorth(), w: pb.getWest(), e: pb.getEast() }, (m) => status(m));
+    if (seq !== flowSeq) return;
+    flow = fl; drawChannels(); status('');
+    if (draw.mode === 'shed') hint('Click a blue channel at the culvert or outlet you want to size.');
+  }, showChannels);
 }
-function drawShed() {
-  shed.layers.forEach((l) => map.removeLayer(l));
-  const { dem, ws, acc } = shed, c = document.createElement('canvas'); c.width = dem.W; c.height = dem.H;
-  const g = c.getContext('2d'), im = g.createImageData(dem.W, dem.H);
-  const ac = (dem.dx * dem.dy) / 4046.86, W = dem.W, H = dem.H;
-  for (let i = 0; i < W * H; i++) if (ws.mask[i]) { const k = i * 4; im.data[k] = 120; im.data[k + 1] = 60; im.data[k + 2] = 200; im.data[k + 3] = 70; }
-  // Channels (2+ acres draining) drawn wider for bigger flows so they stay visible when the image is scaled down.
+function channelImage(fl, mask) {
+  const { dem, acc } = fl, W = dem.W, H = dem.H, c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), im = g.createImageData(W, H), ac = (dem.dx * dem.dy) / 4046.86;
+  if (mask) for (let i = 0; i < W * H; i++) if (mask[i]) { const k = i * 4; im.data[k] = 120; im.data[k + 1] = 60; im.data[k + 2] = 200; im.data[k + 3] = 75; }
   const px = Math.max(1, Math.round(W / Math.max(300, map.getSize().x)));
   for (let i = 0; i < W * H; i++) {
     const a = acc[i] * ac; if (a < 2) continue;
-    const r = px * (a >= 640 ? 3 : a >= 40 ? 2 : 1), x0 = i % W, y0 = (i / W) | 0, inB = ws.mask[i];
+    const r = px * (a >= 640 ? 3 : a >= 40 ? 2 : 1), x0 = i % W, y0 = (i / W) | 0, inB = mask ? mask[i] : 1;
     for (let y = Math.max(0, y0 - r); y <= Math.min(H - 1, y0 + r); y++) for (let x = Math.max(0, x0 - r); x <= Math.min(W - 1, x0 + r); x++) {
       const k = (y * W + x) * 4;
       if (im.data[k + 2] === 255 && im.data[k + 3] === 255) continue;
@@ -573,7 +577,82 @@ function drawShed() {
     }
   }
   g.putImageData(im, 0, 0);
-  const img = L.imageOverlay(c.toDataURL(), [[dem.s, dem.w], [dem.n, dem.e]], { opacity: 0.9 }).addTo(map);
+  return c.toDataURL();
+}
+function drawChannels() {
+  if (chanLayer) map.removeLayer(chanLayer);
+  if (shed?.ws) return; // the basin view draws its own channels
+  chanLayer = L.imageOverlay(channelImage(flow), [[flow.dem.s, flow.dem.w], [flow.dem.n, flow.dem.e]], { opacity: 0.9, interactive: false }).addTo(map);
+}
+
+function setShed(ll) {
+  if (shed) shed.layers.forEach((l) => map.removeLayer(l));
+  shed = { outlet: ll, layers: [] };
+  store.set('shed', [ll.lat, ll.lng]);
+  $('intro').hidden = true;
+  $('noaaLink').href = `https://hdsc.nws.noaa.gov/pfds/pfds_map_cont.html?lat=${ll.lat.toFixed(4)}&lon=${ll.lng.toFixed(4)}`;
+  computeShed();
+}
+function boxAround(ll, R) {
+  const dLat = R / 111320, dLon = R / (111320 * Math.cos(ll.lat * Math.PI / 180));
+  return { s: ll.lat - dLat, n: ll.lat + dLat, w: ll.lng - dLon, e: ll.lng + dLon };
+}
+function computeShed() {
+  const seq = ++shedSeq, ll = shed.outlet;
+  withBusy(async () => {
+    // Start from the loaded flow grid if it holds the outlet with some margin, else load around the outlet.
+    let fl = flow && flow.bounds.pad(-0.05).contains(ll) ? flow : null, R = +$('shedRadius').value;
+    for (let attempt = 0; ; attempt++) {
+      if (!fl) {
+        fl = await buildFlow(boxAround(ll, R), (m) => status(attempt ? `Drainage area is bigger than the loaded area. Loading a larger area… ${m}` : m));
+        if (seq !== shedSeq) return;
+        flow = fl;
+      }
+      const res = delineate(fl, ll);
+      // Grow the area until the basin no longer touches its edge (up to ~4 mi across).
+      if (res.ws.touchesEdge && attempt < 3) {
+        const cur = fl.bounds, half = Math.max(cur.getNorth() - cur.getSouth(), (cur.getEast() - cur.getWest()) * Math.cos(ll.lat * Math.PI / 180)) * 111320 / 2;
+        if (half < 3200) { R = Math.min(3200, half * 2); fl = null; continue; }
+      }
+      Object.assign(shed, res);
+      break;
+    }
+    if (seq !== shedSeq) return;
+    if (chanLayer) { map.removeLayer(chanLayer); chanLayer = null; }
+    drawShed(); shedResults(); $('shedBox').hidden = false; status('');
+    if (shed.areaM2 * M2_TO_AC < 1) hint('That spot drains less than an acre. Drag the blue outlet marker onto a channel.');
+    else if (window.matchMedia('(max-width: 760px)').matches) hint(`Drainage area: ${(shed.areaM2 * M2_TO_AC).toFixed(1)} acres. Results are below the map.`);
+  }, computeShed);
+}
+function delineate(fl, ll) {
+  const { dem, rec, acc } = fl;
+  const px = Math.floor(((ll.lng - dem.w) / (dem.e - dem.w)) * dem.W), py = Math.floor(((dem.n - ll.lat) / (dem.n - dem.s)) * dem.H);
+  if (px < 0 || py < 0 || px >= dem.W || py >= dem.H) throw new Error('That point is outside the loaded lidar. Try again.');
+  // Snap to the strongest flow line within 50 ft; if that isn't a real channel (2+ acres), look out to 160 ft.
+  const chan = (2 * 4046.86) / (dem.dx * dem.dy);
+  let out = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(1, Math.round(15 / dem.dx)));
+  for (const r of [50, 150]) {
+    if (acc[out] >= chan) break;
+    const far = snapOutlet(acc, dem.W, dem.H, px, py, Math.max(2, Math.round(r / dem.dx))); if (acc[far] >= chan) out = far;
+  }
+  const ws = watershed(rec, dem.W, dem.H, out, dem.dx, dem.dy);
+  const areaM2 = ws.cells.length * dem.dx * dem.dy, path = flowPath(rec, ws.far, out);
+  const zOut = dem.data[out], zTop = dem.data[ws.far], pathLen = ws.len[ws.far];
+  let ss = 0, sn = 0;
+  for (const c of ws.cells) {
+    const x = c % dem.W, y = (c / dem.W) | 0; if (x < 1 || y < 1 || x >= dem.W - 1 || y >= dem.H - 1) continue;
+    const gx = (dem.data[c + 1] - dem.data[c - 1]) / (2 * dem.dx), gy = (dem.data[c + dem.W] - dem.data[c - dem.W]) / (2 * dem.dy);
+    if (Number.isFinite(gx) && Number.isFinite(gy)) { ss += Math.hypot(gx, gy); sn++; }
+  }
+  const idxLL = (i) => [dem.n - ((((i / dem.W) | 0) + 0.5) / dem.H) * (dem.n - dem.s), dem.w + (((i % dem.W) + 0.5) / dem.W) * (dem.e - dem.w)];
+  return { dem, rec, acc, ws, out, areaM2, L: pathLen, relief: zTop - zOut, pathSlope: pathLen > 0 ? (zTop - zOut) / pathLen : 0, basinSlope: sn ? ss / sn : 0,
+    snapped: L.latLng(...idxLL(out)), pathLL: path.filter((_, k) => k % 3 === 0 || k === path.length - 1).map(idxLL) };
+}
+function drawShed() {
+  shed.layers.forEach((l) => map.removeLayer(l));
+  const { dem, ws } = shed;
+  const url = channelImage({ dem, acc: shed.acc }, ws.mask);
+  const img = L.imageOverlay(url, [[dem.s, dem.w], [dem.n, dem.e]], { opacity: 0.9 }).addTo(map);
   const box = L.rectangle([[dem.s, dem.w], [dem.n, dem.e]], { color: '#ffffff', weight: 1, dashArray: '4 6', fill: false, interactive: false }).addTo(map);
   const lfp = L.polyline(shed.pathLL, { color: '#ffd400', weight: 3, dashArray: '8 6', interactive: false }).addTo(map);
   const icon = L.divIcon({ className: 'outlet', html: '<span></span>', iconSize: [22, 22] });
@@ -581,7 +660,7 @@ function drawShed() {
   m.on('dragend', () => {
     const p = m.getLatLng(), b = L.latLngBounds([[dem.s, dem.w], [dem.n, dem.e]]).pad(-0.1);
     shed.outlet = p; store.set('shed', [p.lat, p.lng]);
-    computeShed(!b.contains(p));
+    computeShed();
   });
   shed.layers = [img, box, lfp, m];
 }
@@ -625,10 +704,11 @@ $('shedStorm').onclick = () => {
   // Crop to the basin's bounding box (plus a margin) so the simulation grid stays fine.
   let x0 = dem.W, y0 = dem.H, x1 = 0, y1 = 0;
   for (const c of ws.cells) { const x = c % dem.W, y = (c / dem.W) | 0; if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-  const m = 3; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(dem.W - 1, x1 + m); y1 = Math.min(dem.H - 1, y1 + m);
+  const m = Math.max(3, Math.round(0.15 * Math.max(x1 - x0, y1 - y0))); x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(dem.W - 1, x1 + m); y1 = Math.min(dem.H - 1, y1 + m);
   const W = x1 - x0 + 1, H = y1 - y0 + 1, data = new Float32Array(W * H), mask = new Uint8Array(W * H);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y + y0) * dem.W + x + x0; data[y * W + x] = dem.data[i]; mask[y * W + x] = ws.mask[i]; }
-  openStorm({ data, W, H, dx: dem.dx, dy: dem.dy }, { title: `Storm on the ${(shed.areaM2 * M2_TO_AC).toFixed(0)}-acre drainage area`, mask, depthIn: designDepth(), CN: shed.CN });
+  if (shed.areaM2 * M2_TO_AC < 1) { hint('This drainage area is under an acre, too small to simulate. Drag the outlet onto a bigger channel first.'); return; }
+  openStorm({ data, W, H, dx: dem.dx, dy: dem.dy }, { title: `Storm on the ${(shed.areaM2 * M2_TO_AC).toFixed(0)}-acre drainage area`, mask, depthIn: designDepth(), CN: shed.CN, maxCells: 160 });
 };
 $('shedCsv').onclick = () => shed?.ws && download('drainage-area.csv', toCSV(
   ['outlet_lat', 'outlet_lon', 'area_ac', 'flow_path_ft', 'tc_min', 'cn', 'storm', 'rain_in', 'runoff_in', 'volume_acft', 'peak_cfs'],
@@ -671,4 +751,4 @@ const toLL = (a) => (Array.isArray(a) ? a.filter((p) => Array.isArray(p) && p.le
 }
 
 // Test hook (read-only state + programmatic drawing).
-window.__fg = { map, setField, setProfile, setShed, get shed() { return shed; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };
+window.__fg = { map, setField, setProfile, setShed, get shed() { return shed; }, get flow() { return flow; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };
