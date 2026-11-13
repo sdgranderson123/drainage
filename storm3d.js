@@ -65,9 +65,20 @@ export function openStorm(dem, opts = {}) {
   waterGeo.setAttribute('color', new THREE.BufferAttribute(wColor, 4));
   const water = new THREE.Mesh(waterGeo, new THREE.MeshPhongMaterial({ vertexColors: true, transparent: true, shininess: 90, specular: 0x88aacc, depthWrite: false }));
   scene.add(terrain, water);
+  // Moving water: tracer particles carried by the simulated flow, and falling rain.
+  const NP = 6000, pPos = new Float32Array(NP * 3), pGeo = new THREE.BufferGeometry();
+  pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+  const tracers = new THREE.Points(pGeo, new THREE.PointsMaterial({ color: 0xeaf6ff, size: 2.4, sizeAttenuation: false, transparent: true, opacity: 0.9, depthWrite: false }));
+  const NR = 2500, rPos = new Float32Array(NR * 3), rGeo = new THREE.BufferGeometry();
+  rGeo.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
+  const rain = new THREE.Points(rGeo, new THREE.PointsMaterial({ color: 0xc8d4e0, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.7, depthWrite: false }));
+  tracers.frustumCulled = rain.frustumCulled = false;
+  scene.add(tracers, rain);
 
   const sim = new StormSim(c.z, W, H, Math.sqrt(sx * sy), { depthIn: +$('stDepth').value, CN: +$('stCN').value, drain: c.drain, rainMask: c.rain, sinks: c.sinks, manning: +$('stN').value });
-  ctx = { renderer, scene, camera, controls, terrain, water, c, sim, lo, playing: false, raf: 0, sx, sy, cellArea: sx * sy, opts, dem };
+  ctx = { renderer, scene, camera, controls, terrain, water, c, sim, lo, playing: false, raf: 0, sx, sy, cellArea: sx * sy, opts, dem,
+    tracers, rain, tp: { x: new Float32Array(NP), y: new Float32Array(NP), age: new Float32Array(NP).fill(1e9), n: NP },
+    rp: { x: new Float32Array(NR), y: new Float32Array(NR), z: new Float32Array(NR), n: NR }, lastFrame: performance.now() };
   setExaggeration();
   frameCamera();
   resize(); window.addEventListener('resize', resize);
@@ -169,6 +180,49 @@ function drawChart() {
   g.strokeStyle = muted; g.lineWidth = 1; g.beginPath(); g.moveTo(X(ctx.sim.t), T0); g.lineTo(X(ctx.sim.t), H - B0); g.stroke();
 }
 let chartT = 0;
+// Tracers: placed on wet cells (deeper water more likely), moved along the depth-averaged velocity.
+const VIS = 5;     // cells per second of screen time for 1 m/s of flow (real speeds are far too fast to see at 1 h/s)
+function respawn(tp, k) {
+  const { sim, c } = ctx, n = c.W * c.H;
+  for (let t = 0; t < 30; t++) {
+    const i = (Math.random() * n) | 0, h = sim.h[i];
+    if (h > 0.002 && Math.random() < Math.min(1, h / 0.02)) { tp.x[k] = (i % c.W) + Math.random(); tp.y[k] = ((i / c.W) | 0) + Math.random(); tp.age[k] = Math.random() * 2; return true; }
+  }
+  tp.age[k] = 1e9; return false;
+}
+function updateParticles(dtWall) {
+  const { sim, c, tp, tracers, lo } = ctx, W = c.W, H = c.H, e = exag(), dx = sim.dx, pos = tracers.geometry.attributes.position.array;
+  const { fx, fxl, fy, fyu, h, b } = sim;
+  for (let k = 0; k < tp.n; k++) {
+    let x = tp.x[k], y = tp.y[k];
+    let ix = x | 0, iy = y | 0, i = iy * W + ix;
+    if (tp.age[k] > 6 || ix < 0 || iy < 0 || ix >= W || iy >= H || h[i] < 0.0015) { if (!respawn(tp, k)) { pos[k * 3 + 1] = -1e6; continue; } x = tp.x[k]; y = tp.y[k]; ix = x | 0; iy = y | 0; i = iy * W + ix; }
+    const hh = Math.max(h[i], 0.002);
+    // Depth-averaged velocity (m/s) from the pipe fluxes through the cell's faces.
+    const u = ((fx[i] - fxl[i]) + (ix > 0 ? fx[i - 1] : 0) - (ix < W - 1 ? fxl[i + 1] : 0)) / (2 * hh * dx);
+    const v = ((fy[i] - fyu[i]) + (iy > 0 ? fy[i - W] : 0) - (iy < H - 1 ? fyu[i + W] : 0)) / (2 * hh * dx);
+    let mx = u * VIS * dtWall, my = v * VIS * dtWall; const m = Math.hypot(mx, my); if (m > 0.9) { mx *= 0.9 / m; my *= 0.9 / m; }
+    tp.x[k] = x + mx; tp.y[k] = y + my; tp.age[k] += dtWall;
+    const j = (Math.min(H - 1, Math.max(0, tp.y[k] | 0))) * W + Math.min(W - 1, Math.max(0, tp.x[k] | 0));
+    pos[k * 3] = tp.x[k] * ctx.sx; pos[k * 3 + 2] = tp.y[k] * ctx.sy; pos[k * 3 + 1] = (b[j] + h[j] - lo) * e + 0.08;
+  }
+  tracers.geometry.attributes.position.needsUpdate = true;
+}
+// Rain: count follows the current intensity; drops fall and restart above the terrain.
+function updateRain(dtWall) {
+  const { sim, c, rp, rain, lo } = ctx, e = exag(), pos = rain.geometry.attributes.position.array;
+  const now = sim.t, iNow = (sim.cumRainM(now + 300) - sim.cumRainM(now)) / 300 * 3600 / 0.0254; // in/h
+  const active = ctx.playing ? Math.min(rp.n, Math.round(rp.n * Math.min(1, iNow / 1.5))) : 0;
+  const top = Math.max(30, (Math.max(c.W * ctx.sx, c.H * ctx.sy)) * 0.15);
+  for (let k = 0; k < rp.n; k++) {
+    if (k >= active) { pos[k * 3 + 1] = -1e6; continue; }
+    rp.z[k] -= top * 1.6 * dtWall;
+    if (!(rp.z[k] > 0) || rp.z[k] > top * 2) { rp.x[k] = Math.random() * c.W; rp.y[k] = Math.random() * c.H; rp.z[k] = top * (0.3 + Math.random()); }
+    const j = Math.min(c.H - 1, rp.y[k] | 0) * c.W + Math.min(c.W - 1, rp.x[k] | 0);
+    pos[k * 3] = rp.x[k] * ctx.sx; pos[k * 3 + 2] = rp.y[k] * ctx.sy; pos[k * 3 + 1] = (sim.b[j] - lo) * e + rp.z[k];
+  }
+  rain.geometry.attributes.position.needsUpdate = true;
+}
 function loop() {
   if (!ctx) return;
   ctx.raf = requestAnimationFrame(loop);
@@ -178,6 +232,8 @@ function loop() {
     const target = Math.min(24 * 3600 + 2 * 3600, sim.t + speed / 60);
     const done = sim.run(target, 14);
     updateWater();
+    const nowT = performance.now(), dtw = Math.min(0.1, (nowT - ctx.lastFrame) / 1000); ctx.lastFrame = nowT;
+    updateParticles(dtw); updateRain(dtw);
     if (performance.now() - chartT > 250) { chartT = performance.now(); updateStats(); drawChart(); }
     if (done && sim.t >= 26 * 3600) { ctx.playing = false; $('stPlay').textContent = 'Replay'; updateStats(); drawChart(); }
   }
@@ -193,7 +249,7 @@ function reset() {
 export function closeStorm() {
   if (!ctx) return;
   cancelAnimationFrame(ctx.raf); window.removeEventListener('resize', resize);
-  ctx.terrain.geometry.dispose(); ctx.water.geometry.dispose(); ctx.renderer.dispose();
+  ctx.terrain.geometry.dispose(); ctx.water.geometry.dispose(); ctx.tracers.geometry.dispose(); ctx.rain.geometry.dispose(); ctx.renderer.dispose();
   ctx = null;
   $('storm').hidden = true; document.body.classList.remove('modal-open');
 }

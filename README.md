@@ -27,6 +27,15 @@ Static files, no build step, no backend.
   - **Wetlands**: USFWS National Wetlands Inventory polygons on the map, acres of mapped wetland inside the field
     by type, and a warning when your changes disturb mapped wetland. Screening only, not a delineation.
   - **Storm 3D with changes**: runs the storm on the changed surface; tile acts as a capacity-limited sink.
+- **Import survey data**: total-station point files (PNEZD and other column orders, .csv/.txt), ASCII DXF
+  (points, 3D lines/polylines, 3DFACE surfaces), LandXML surfaces (Civil 3D TIN) and points, LAS and LAZ point
+  clouds (ground class used when present). The coordinate system is read from the file when it says (LAS,
+  LandXML) or entered as an EPSG code (state plane, UTM). Survey elevations replace the USGS lidar wherever the
+  survey covers, in every tool. On import the survey is compared with the lidar: a consistent offset flags a
+  datum or units problem. DWG can't be read in a browser: save as DXF or export LandXML.
+  Accuracy is the survey's: elevations are interpolated linearly between shots (TIN) or averaged per cell (clouds).
+- **Storm 3D** now shows the water moving: tracer particles ride the simulated flow and rain falls at the
+  current intensity.
 - **Drainage area & peak flow** (press **D**): click a culvert, tile outlet or ditch point. Delineates the
   contributing area from the lidar (depression filling + D8 flow), shows the channel network and the longest
   flow path, and reports area, relief, slopes and time of concentration (NRCS lag and Kirpich). Pick land
@@ -75,6 +84,7 @@ replaced by synthetic lidar of known shape, and checks:
 
 | File | Purpose |
 | --- | --- |
+| `survey.js`, `surveyio.js` | Survey parsers (PNEZD, DXF, LandXML, LAS), LAZ via laz-perf, projection, TIN/cloud gridding |
 | `design.js` | Ponds, raise/lower, tile, exit points, wetland overlap on a grid |
 | `hydro.js` | Depression filling, D8 flow, watershed, Tc, TR-55 (runoff, Type II peak), Type II rainfall |
 | `storm.js`, `storm3d.js` | Storm simulation and its three.js viewer |

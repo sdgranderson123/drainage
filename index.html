@@ -60,12 +60,34 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c3 4 6 7 6 11a6 6 0 0 1-12 0c0-4 3-7 6-11z"/><path d="M12 21v-6"/></svg>
           <span><b>Drainage area &amp; peak flow</b><small>Click a culvert or outlet: basin, Tc, TR-55 peaks</small></span></button>
       </div>
+      <button type="button" class="tool" id="bSurvey">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg>
+        <span><b>Import survey data</b><small>Total station points, DXF, LandXML, LAS/LAZ</small></span></button>
       <label class="switch"><input type="checkbox" id="relief"> <span>Lidar relief on the map</span></label>
       <div id="reliefOpts" class="row" hidden>
         <label for="reliefOpacity" class="small">Opacity</label>
         <input type="range" id="reliefOpacity" min="0.2" max="1" step="0.05" value="0.85">
       </div>
       <p id="status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="card" id="svBox" hidden>
+      <div class="cardhead"><h2>Survey data</h2></div>
+      <p class="small muted">Surveyed elevations replace the USGS lidar wherever the survey covers. Accuracy is the survey's own: the app interpolates between shots and cannot add detail that wasn't measured.</p>
+      <div class="grid2">
+        <label class="span2">File<input id="svFile" type="file" accept=".csv,.txt,.pnezd,.xyz,.dxf,.xml,.landxml,.las,.laz,.dwg"></label>
+        <label class="span2" id="svOrderRow">Point file column order<select id="svOrder">
+          <option value="PNEZD">P, N, E, Z, D (most common)</option><option value="PENZD">P, E, N, Z, D</option>
+          <option value="NEZ">N, E, Z</option><option value="ENZ">E, N, Z</option></select></label>
+        <label>Coordinate system<select id="svCrs">
+          <option value="auto">From the file</option><option value="epsg">EPSG code…</option><option value="utm">UTM (NAD83) here</option></select></label>
+        <label>EPSG code<input id="svEpsg" type="number" min="1000" max="99999" placeholder="e.g. 3417" hidden></label>
+        <label>Elevation units<select id="svZ"><option value="auto">Same as horizontal</option><option value="usft">US survey feet</option><option value="ft">International feet</option><option value="m">Metres</option></select></label>
+        <label title="Triangles with a side longer than this are dropped (gaps between survey areas)">Max triangle side, ft<input id="svEdge" type="number" min="10" max="2000" step="10" value="200"></label>
+      </div>
+      <p class="small muted">State plane codes are listed at <a href="https://epsg.io/?q=state+plane" target="_blank" rel="noopener">epsg.io ↗</a> (e.g. NAD83 Iowa North US ft = 3417, Iowa South = 3418). DWG: save as DXF or export LandXML from Civil 3D.</p>
+      <div class="row"><button type="button" class="btn primary" id="svLoad">Load survey</button><button type="button" class="btn" id="svRemove" hidden>Remove survey</button></div>
+      <div id="svResult" class="small"></div>
     </section>
 
     <section class="card" id="intro">
