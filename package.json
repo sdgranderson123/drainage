@@ -2,13 +2,15 @@
   "type": "module",
   "devDependencies": {
     "axe-core": "^4.14.0",
+    "delaunator": "^5.0.1",
     "geotiff": "^2.1.3",
-    "html-validate": "^8.29.0"
+    "html-validate": "^8.29.0",
+    "proj4": "^2.11.0"
   },
   "name": "fieldgrade",
   "private": true,
   "scripts": {
-    "test": "node --test earthwork.test.mjs tests/source.test.mjs tests/hydro.test.mjs tests/storm.test.mjs tests/design.test.mjs",
+    "test": "node --test earthwork.test.mjs tests/source.test.mjs tests/hydro.test.mjs tests/storm.test.mjs tests/design.test.mjs tests/survey.test.mjs",
     "test:e2e": "node tests/e2e.mjs",
     "test:live": "node tests/live-check.mjs",
     "lint": "html-validate index.html",

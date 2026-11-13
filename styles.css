@@ -60,6 +60,9 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .switch input { width: 16px; height: 16px; accent-color: var(--acc); }
 .status { margin: 8px 0 0; min-height: 1.2em; color: var(--muted); font-size: 13px; }
 .status.err { color: var(--cut); }
+.okline { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--acc-soft); }
+#svResult { margin-top: 10px; display: grid; gap: 6px; }
+input[type=file] { font: inherit; font-size: 13px; }
 .steps { margin: 0; padding-left: 20px; } .steps li { margin: 4px 0; }
 
 /* results */
@@ -113,6 +116,9 @@ li.edit { border: 1px solid var(--line); border-radius: 8px; padding: 8px; displ
 .edhead { display: flex; align-items: center; gap: 6px; } .edhead b { flex: 1; }
 .edhead .sw { width: 12px; height: 12px; border-radius: 3px; }
 .err { color: var(--cut); }
+.okline { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--acc-soft); }
+#svResult { margin-top: 10px; display: grid; gap: 6px; }
+input[type=file] { font: inherit; font-size: 13px; }
 /* While drawing, markers and shapes must not swallow clicks meant for new points. */
 .drawing .leaflet-marker-icon, .drawing .leaflet-interactive { pointer-events: none !important; }
 .exit span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: #ff8c00; color: #111;

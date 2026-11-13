@@ -1,6 +1,8 @@
 import { toLocal, pointInPolygon, polygonArea, fitPlane, planeFromSlope, slopeOf, designZ, volumes, balance,
   profileStats, quantile, hillshade, rampColor, toCSV, parseLatLon, M_TO_FT, M3_TO_YD3, M2_TO_AC } from './earthwork.js';
-import { fetchDEM, sample, pointElevation, geocode, lidarSource, robustFetch } from './dem.js';
+import { fetchDEM as fetchLidar, sample, pointElevation, geocode, lidarSource, robustFetch } from './dem.js';
+import { readSurvey, epsgDef, utmEPSG, transformFor, surveyExtent, gridSurvey, Delaunator } from './surveyio.js';
+import { compareSurfaces } from './survey.js';
 import { fillDepressions, d8, accumulate, snapOutlet, watershed, flowPath, scsRunoff, tcLag, tcKirpich, tr55Peak, LAND_USE } from './hydro.js';
 import { openStorm } from './storm3d.js';
 import { applyEdits, rasterPolygon, surfaceDiff, exitPoints, groupExits, wetlandOverlap, cellLatLon } from './design.js';
@@ -53,7 +55,7 @@ async function withBusy(fn, retry) {
   busy++; $('progress').hidden = false; showMapMsg('Working…', 'busy');
   if (retry) lastAction = retry;
   try { const r = await fn(); return r; }
-  catch (e) { if (e.name !== 'AbortError') { status(e.message || String(e), true); showMapMsg(e.message || String(e), 'err'); console.error(e); } }
+  catch (e) { if (e.name !== 'AbortError') { status(e.message || String(e), true); showMapMsg(e.message || String(e), 'err'); console.warn(e); } }
   finally { if (--busy === 0) { $('progress').hidden = true; if (!$('mapmsg').classList.contains('err') && !$('mapmsg').classList.contains('info')) showMapMsg(''); } }
 }
 function hint(msg) { showMapMsg(msg, 'info'); }
@@ -80,6 +82,100 @@ $('locate').onclick = () => {
     (p) => { map.setView([p.coords.latitude, p.coords.longitude], 17, { animate: false }); status(''); },
     () => status('Could not get your location.', true), { enableHighAccuracy: true, timeout: 15000 });
 };
+
+// ---------------- survey import ----------------
+// A loaded survey replaces lidar elevations wherever it has coverage, in every grid the app fetches.
+let survey = null, surveyLayers = [];
+async function fetchDEM(bounds, opts) {
+  const dem = await fetchLidar(bounds, opts);
+  if (survey) await burnSurvey(dem);
+  return dem;
+}
+async function burnSurvey(dem) {
+  const ex = survey.extent;
+  if (ex.n < dem.s || ex.s > dem.n || ex.e < dem.w || ex.w > dem.e) return;
+  const g = gridSurvey(dem, survey.sv, survey.tf.toLL, survey.tf.zScale, await Delaunator(), { maxEdgeM: survey.maxEdgeM });
+  dem.lidar = Float32Array.from(dem.data); dem.svMask = new Uint8Array(dem.W * dem.H);
+  for (let i = 0; i < g.z.length; i++) if (g.z[i] === g.z[i]) { dem.data[i] = g.z[i]; dem.svMask[i] = 1; }
+  dem.surveyCells = g.cells;
+}
+$('bSurvey').onclick = () => { $('svBox').hidden = false; $('svBox').scrollIntoView({ behavior: 'smooth', block: 'start' }); $('intro').hidden = true; };
+$('svFile').onchange = () => {
+  const f = $('svFile').files[0]; if (!f) return;
+  const isPts = !/\.(las|laz|dxf|xml|landxml|dwg)$/i.test(f.name);
+  $('svOrderRow').hidden = !isPts;
+};
+$('svCrs').onchange = () => { $('svEpsg').hidden = $('svCrs').value !== 'epsg'; };
+$('svLoad').onclick = () => importSurvey();
+$('svRemove').onclick = () => { survey = null; surveyLayers.forEach((l) => map.removeLayer(l)); surveyLayers = []; $('svResult').innerHTML = ''; $('svRemove').hidden = true; reloadAllSurfaces(); };
+async function importSurvey() {
+  const f = $('svFile').files[0];
+  if (!f) { status('Choose a survey file first.', true); return; }
+  await withBusy(async () => {
+    status(`Reading ${f.name}…`);
+    const sv = await readSurvey(f, { order: $('svOrder').value, onProgress: (m) => status(m) });
+    const n = sv.xyz.length / 3;
+    if (n < 3) throw new Error(`${f.name}: no 3D points found. For DXF, points/lines must have elevations (Z).`);
+    // Coordinate system: from the file, a typed EPSG code, or UTM for the map location.
+    let code = null, how = '';
+    const pick = $('svCrs').value;
+    if (pick === 'epsg') { code = parseInt($('svEpsg').value, 10); how = 'entered'; if (!code) throw new Error('Enter the EPSG code of the survey coordinate system (it is on the survey plat or in the file notes).'); }
+    else if (pick === 'utm') { code = utmEPSG(map.getCenter().lng); how = 'UTM for the map location'; }
+    else if (sv.epsg) { code = sv.epsg; how = 'read from the file'; }
+    else throw new Error('This file does not say what coordinate system it uses. Choose "EPSG code" and enter it from the survey (for example 3417 for NAD83 Iowa North, US feet).');
+    status(`Looking up EPSG:${code}…`);
+    const def = await epsgDef(code), tf = await transformFor(def, $('svZ').value);
+    const extent = surveyExtent(sv, tf.toLL);
+    if (!(Math.abs(extent.lat) <= 90 && Math.abs(extent.lon) <= 180) || extent.n - extent.s > 2 || extent.e - extent.w > 2)
+      throw new Error(`With EPSG:${code} the points land in an impossible place. The coordinate system is probably wrong.`);
+    const maxEdgeM = (+$('svEdge').value || 200) * 0.3048;
+    survey = { sv, tf, extent, code, def, maxEdgeM, name: f.name };
+    // Check against lidar on the survey area: a consistent offset means a datum or units problem.
+    status('Comparing with USGS lidar…');
+    const pad = 0.0005, cmpDem = await fetchLidar({ s: extent.s - pad, n: extent.n + pad, w: extent.w - pad, e: extent.e + pad }, { maxPx: 600, onProgress: (m) => status(m) });
+    const g = gridSurvey(cmpDem, sv, tf.toLL, tf.zScale, await Delaunator(), { maxEdgeM });
+    const cmp = compareSurfaces(g.z, cmpDem.data);
+    survey.cmp = cmp; survey.coverAc = (g.cells * cmpDem.dx * cmpDem.dy) / 4046.86;
+    drawSurvey();
+    map.fitBounds([[extent.s, extent.w], [extent.n, extent.e]], { padding: [40, 40], animate: false });
+    showSurveyResult(how);
+    reloadAllSurfaces();
+  }, importSurvey);
+}
+function drawSurvey() {
+  surveyLayers.forEach((l) => map.removeLayer(l)); surveyLayers = [];
+  const { sv, tf, extent } = survey, n = sv.xyz.length / 3;
+  surveyLayers.push(L.rectangle([[extent.s, extent.w], [extent.n, extent.e]], { color: '#e83e8c', weight: 2, dashArray: '6 4', fill: false, interactive: false }).addTo(map));
+  if (n <= 3000 && sv.kind !== 'cloud') {
+    const g = L.layerGroup();
+    for (let k = 0; k < n; k++) {
+      const [la, lo] = tf.toLL(sv.xyz[k * 3], sv.xyz[k * 3 + 1]);
+      L.circleMarker([la, lo], { radius: 2.5, color: '#e83e8c', weight: 1, fillOpacity: 0.9, interactive: false }).addTo(g);
+    }
+    surveyLayers.push(g.addTo(map));
+  }
+}
+function showSurveyResult(how) {
+  const { sv, code, cmp } = survey, n = sv.xyz.length / 3;
+  const parts = [`<b>${survey.name}</b>: ${fmt(n)} ${sv.kind === 'cloud' ? 'points' : sv.kind === 'tin' ? 'TIN points' : 'shots'}${sv.note ? ` (${sv.note})` : ''}. EPSG:${code} (${how}). Covers ${survey.coverAc.toFixed(1)} ac.`];
+  let warn = '';
+  if (cmp) {
+    const off = cmp.median * M_TO_FT, spread = cmp.mad * M_TO_FT;
+    parts.push(`Survey vs USGS lidar over ${fmt(cmp.n)} cells: median ${off >= 0 ? '+' : ''}${off.toFixed(2)} ft, typical spread ±${spread.toFixed(2)} ft.`);
+    if (Math.abs(off) > 0.5) warn = `The survey sits ${Math.abs(off).toFixed(2)} ft ${off > 0 ? 'above' : 'below'} the lidar everywhere. That usually means a different vertical datum (NAVD88 vs NGVD29 or an assumed benchmark) or wrong Z units. Check before using the numbers.`;
+    else if (spread > 1) warn = 'The survey and lidar disagree a lot from place to place. The coordinate system may be wrong (points slightly shifted), or the ground has changed since the lidar was flown.';
+  } else warn = 'No lidar to compare against here.';
+  $('svResult').innerHTML = parts.join(' ') + (warn ? `<div class="warn">${warn}</div>` : '<div class="okline">Matches the lidar closely. Survey elevations now replace lidar inside the pink box.</div>');
+  $('svRemove').hidden = false;
+}
+// After a survey change, reload every surface so results use the new elevations.
+function reloadAllSurfaces() {
+  if (relief) { clearRelief(); if (reliefWanted()) loadRelief(); }
+  flow = null;
+  if (profile) { profile.dem = null; computeProfile(); }
+  if (field) { field.dem = null; loadField(); }
+  if (shed) { computeShed(); }
+}
 
 // ---------------- lidar relief layer ----------------
 let relief = null, reliefCtl = null, reliefT;
@@ -149,6 +245,11 @@ const demsForHover = () => [field?.dem, profile?.dem, shed?.dem, relief?.dem].fi
 map.on('mousemove', (ev) => showElevation(ev.latlng));
 // Touch screens have no hover: a tap (when not drawing) shows the elevation there.
 map.on('click', (ev) => { if (!draw.mode) showElevation(ev.latlng); });
+function fromSurvey(d, lat, lng) {
+  if (!d.svMask) return false;
+  const x = Math.floor(((lng - d.w) / (d.e - d.w)) * d.W), y = Math.floor(((d.n - lat) / (d.n - d.s)) * d.H);
+  return x >= 0 && y >= 0 && x < d.W && y < d.H && d.svMask[y * d.W + x] === 1;
+}
 function cutFillAt(lat, lng, z) {
   if (!field?.plane || !field.P) return '';
   const q = toLocal(lat, lng, field.origin[0], field.origin[1]);
@@ -160,7 +261,7 @@ function showElevation(ll) {
   const { lat, lng } = ll, at = `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
   for (const d of demsForHover()) {
     const z = sample(d, lat, lng);
-    if (Number.isFinite(z)) { $('hover').textContent = `${at} · ${ft(z)} ft${cutFillAt(lat, lng, z)}`; return; }
+    if (Number.isFinite(z)) { $('hover').textContent = `${at} · ${ft(z)} ft${fromSurvey(d, lat, lng) ? ' (survey)' : ''}${cutFillAt(lat, lng, z)}`; return; }
   }
   $('hover').textContent = `${at} · …`;
   clearTimeout(hoverT); hoverCtl?.abort();
@@ -912,4 +1013,4 @@ const toLL = (a) => (Array.isArray(a) ? a.filter((p) => Array.isArray(p) && p.le
 }
 
 // Test hook (read-only state + programmatic drawing).
-window.__fg = { get design() { return design; }, get edits() { return edits; }, addEdit: (t, p) => addEdit(t, p.map(([a, b]) => L.latLng(a, b))), map, setField, setProfile, setShed, get shed() { return shed; }, get flow() { return flow; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };
+window.__fg = { get survey() { return survey; }, importSurvey, get design() { return design; }, get edits() { return edits; }, addEdit: (t, p) => addEdit(t, p.map(([a, b]) => L.latLng(a, b))), map, setField, setProfile, setShed, get shed() { return shed; }, get flow() { return flow; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };

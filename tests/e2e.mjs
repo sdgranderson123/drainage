@@ -59,6 +59,10 @@ async function newPage(opts = {}) {
   await page.route('**/wetlandsmapservice/**', (r) => r.fulfill({ json: { type: 'FeatureCollection', features: [{ type: 'Feature',
     properties: { WETLAND_TYPE: 'Freshwater Emergent Wetland', ATTRIBUTE: 'PEM1C', ACRES: 12 },
     geometry: { type: 'Polygon', coordinates: [[[LON0, LAT0], [LON0 + 0.0024, LAT0], [LON0 + 0.0024, LAT0 + 0.002], [LON0, LAT0 + 0.002], [LON0, LAT0]]] } }] } }));
+  // Coordinate system definitions (epsg.io) from fixtures.
+  await page.route('**/epsg.io/*.proj4', (r) => { const code = r.request().url().match(/(\d+)\.proj4/)[1];
+    const f = path.join(ROOT, 'tests', 'fixtures', `epsg${code}.proj4`);
+    return fs.existsSync(f) ? r.fulfill({ body: fs.readFileSync(f, 'utf8'), contentType: 'text/plain' }) : r.fulfill({ status: 404, body: 'no' }); });
   await page.route('**/elevation.nationalmap.gov/**', async (r) => {
     const u = r.request().url();
     calls++;
@@ -339,7 +343,65 @@ console.log('Site design: drainage paths, pond, raise/lower, tile, wetlands');
   await page.context().close();
 }
 
-// ---------- 8. phone layout + dark mode ----------
+// ---------- 8. survey import (CSV, DXF, LandXML, LAS, LAZ, DWG) and moving water ----------
+console.log('Survey import: replaces lidar with surveyed elevations');
+{
+  surface = plane;
+  // Known survey surface = lidar plane + 0.10 m, with a 0.5 m deep ditch for |x| <= 5 m (see tests/fixtures).
+  const zSurv = (x, y) => plane(x, y) + 0.10 - (x >= -5 && x <= 5 ? 0.5 : 0);
+  const cases = [['survey_pnezd.csv', 'epsg', 2255], ['survey.dxf', 'epsg', 2255], ['survey_tin.xml', 'auto'], ['cloud.las', 'auto'], ['cloud.laz', 'auto']];
+  for (const [file, crs, code] of cases) {
+    const page = await newPage();
+    await page.click('#bSurvey');
+    await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', file));
+    await page.selectOption('#svCrs', crs);
+    if (code) await page.fill('#svEpsg', String(code));
+    await page.click('#svLoad');
+    await page.waitForFunction(() => window.__fg.survey?.cmp !== undefined && window.__fg.busy === 0 || document.querySelector('#status').classList.contains('err'), null, { timeout: 120000 });
+    const res = await page.textContent('#svResult'), err = await page.evaluate(() => document.querySelector('#status').classList.contains('err') ? document.querySelector('#status').textContent : '');
+    const med = await page.evaluate(() => window.__fg.survey?.cmp?.median);
+    check(!err && near(med, 0.10, 0.02), `${file}: loaded, survey − lidar median ${(med ?? NaN).toFixed(3)} m ≈ +0.10 m`, err || res.slice(0, 160));
+    // A field over the survey now uses survey elevations: check the ditch and a bank against the known surface.
+    const F = [[LAT0 + 0.0006, LON0 - 0.0007], [LAT0 + 0.0006, LON0 + 0.0007], [LAT0 - 0.0006, LON0 + 0.0007], [LAT0 - 0.0006, LON0 - 0.0007]];
+    await page.evaluate((p) => window.__fg.setField(p.map(([a, b]) => window.L.latLng(a, b))), F);
+    await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.field?.dem?.svMask && window.__fg.busy === 0, null, { timeout: 120000 });
+    const z = await page.evaluate(([la0, lo0]) => { const d = window.__fg.field.dem, at = (x, y) => {
+        const la = la0 + y / 111194.9, lo = lo0 + x / (111194.9 * Math.cos(la0 * Math.PI / 180));
+        const i = Math.floor(((lo - d.w) / (d.e - d.w)) * d.W), j = Math.floor(((d.n - la) / (d.n - d.s)) * d.H); return d.data[j * d.W + i]; };
+      return { ditch: at(0, 20), bank: at(30, -20) }; }, [LAT0, LON0]);
+    const tol = file.startsWith('survey_tin') ? 0.03 : 0.03;
+    if (!file.startsWith('survey_tin')) check(near(z.ditch, zSurv(0, 20), 0.03), `${file}: ditch bottom ${z.ditch.toFixed(3)} m ≈ ${zSurv(0, 20).toFixed(3)} m (lidar alone: ${plane(0, 20).toFixed(3)})`);
+    check(near(z.bank, zSurv(30, -20), tol), `${file}: field elevation ${z.bank.toFixed(3)} m ≈ survey ${zSurv(30, -20).toFixed(3)} m`);
+    await page.context().close();
+  }
+  const page = await newPage();
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFile', { name: 'site.dwg', mimeType: 'application/acad', buffer: Buffer.from('AC1032 binary') });
+  await page.click('#svLoad');
+  await page.waitForFunction(() => document.querySelector('#status').classList.contains('err'), null, { timeout: 20000 });
+  check(/DXF/.test(await page.textContent('#status')), 'DWG explains how to export DXF / LandXML instead');
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
+console.log('Storm 3D: moving water and rain');
+{
+  surface = plane; const page = await newPage(); await drawField(page);
+  await page.click('#fieldStorm');
+  await page.waitForFunction(() => window.__storm.ctx?.sim.t > 12.2 * 3600, null, { timeout: 400000 });
+  const snap = () => page.evaluate(() => { const c = window.__storm.ctx, t = c.tracers.geometry.attributes.position.array, r = c.rain.geometry.attributes.position.array;
+    let live = 0, rainOn = 0; const xs = []; for (let k = 0; k < t.length / 3; k++) if (t[k * 3 + 1] > -1e5) { live++; xs.push(t[k * 3], t[k * 3 + 2]); }
+    for (let k = 0; k < r.length / 3; k++) if (r[k * 3 + 1] > -1e5) rainOn++; return { live, rainOn, xs: xs.slice(0, 400) }; });
+  const a = await snap(); await page.waitForTimeout(700); const b = await snap();
+  let moved = 0; for (let k = 0; k < Math.min(a.xs.length, b.xs.length); k++) if (Math.abs(a.xs[k] - b.xs[k]) > 0.01) moved++;
+  check(a.live > 500, `${a.live} water tracers on the ground`);
+  check(moved > 50, `tracers move with the flow (${moved} coordinates changed)`);
+  check(a.rainOn > 0 || b.rainOn > 0, `rain drops falling (${Math.max(a.rainOn, b.rainOn)})`);
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-moving-water.png') });
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
+
+// ---------- 9. phone layout + dark mode ----------
 console.log('UI: phone layout, dark mode');
 {
   surface = plane; const page = await newPage({ viewport: { width: 390, height: 844 }, colorScheme: 'dark', isMobile: true, hasTouch: true });
