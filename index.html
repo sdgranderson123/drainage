@@ -62,7 +62,7 @@
       </div>
       <button type="button" class="tool" id="bSurvey">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/></svg>
-        <span><b>Import survey data</b><small>Total station points, DXF, LandXML, LAS/LAZ</small></span></button>
+        <span><b>Survey &amp; design files</b><small>DWG, DXF, LandXML, total station points, LAS/LAZ</small></span></button>
       <label class="switch"><input type="checkbox" id="relief"> <span>Lidar relief on the map</span></label>
       <div id="reliefOpts" class="row" hidden>
         <label for="reliefOpacity" class="small">Opacity</label>
@@ -72,10 +72,14 @@
     </section>
 
     <section class="card" id="svBox" hidden>
-      <div class="cardhead"><h2>Survey data</h2></div>
-      <p class="small muted">Surveyed elevations replace the USGS lidar wherever the survey covers. Accuracy is the survey's own: the app interpolates between shots and cannot add detail that wasn't measured.</p>
+      <div class="cardhead"><h2>Survey &amp; design files</h2></div>
+      <p class="small muted">Existing-ground surveys replace the USGS lidar where they cover. A proposed (FG) surface becomes your design for cut/fill, drainage and storms. CAD linework is drawn on the map. Accuracy is the file's own: elevations are interpolated between shots.</p>
       <div class="grid2">
-        <label class="span2">File<input id="svFile" type="file" accept=".csv,.txt,.pnezd,.xyz,.dxf,.xml,.landxml,.las,.laz,.dwg"></label>
+        <label class="span2">Files (pick a drawing and its xrefs together)<input id="svFile" type="file" multiple accept=".csv,.txt,.pnezd,.xyz,.dxf,.xml,.landxml,.las,.laz,.dwg"></label>
+        <label class="span2">Use the elevations as<select id="svRole">
+          <option value="existing">Existing ground (survey / EG)</option>
+          <option value="design">Proposed design (FG / finished grade)</option>
+          <option value="linework">Linework only (no elevations)</option></select></label>
         <label class="span2" id="svOrderRow">Point file column order<select id="svOrder">
           <option value="PNEZD">P, N, E, Z, D (most common)</option><option value="PENZD">P, E, N, Z, D</option>
           <option value="NEZ">N, E, Z</option><option value="ENZ">E, N, Z</option></select></label>
@@ -85,9 +89,15 @@
         <label>Elevation units<select id="svZ"><option value="auto">Same as horizontal</option><option value="usft">US survey feet</option><option value="ft">International feet</option><option value="m">Metres</option></select></label>
         <label title="Triangles with a side longer than this are dropped (gaps between survey areas)">Max triangle side, ft<input id="svEdge" type="number" min="10" max="2000" step="10" value="200"></label>
       </div>
-      <p class="small muted">State plane codes are listed at <a href="https://epsg.io/?q=state+plane" target="_blank" rel="noopener">epsg.io ↗</a> (e.g. NAD83 Iowa North US ft = 3417, Iowa South = 3418). DWG: save as DXF or export LandXML from Civil 3D.</p>
-      <div class="row"><button type="button" class="btn primary" id="svLoad">Load survey</button><button type="button" class="btn" id="svRemove" hidden>Remove survey</button></div>
+      <p class="small muted">State plane codes are listed at <a href="https://epsg.io/?q=state+plane" target="_blank" rel="noopener">epsg.io ↗</a> (e.g. NAD83(2011) Minnesota South US ft = 6505, NAD83 Iowa North US ft = 3417). Civil 3D surfaces: export LandXML (Output → Export to LandXML).</p>
+      <div class="row"><button type="button" class="btn primary" id="svLoad">Load files</button><button type="button" class="btn" id="svRemove" hidden>Remove all</button></div>
       <div id="svResult" class="small"></div>
+      <div id="cadBox" hidden>
+        <h3 class="sub">Drawing layers</h3>
+        <p class="small muted">Click a closed shape on the map (fence, pad, rock edge) to use it.</p>
+        <div class="row tight"><button type="button" class="link" id="cadAll">All on</button><button type="button" class="link" id="cadNone">All off</button></div>
+        <ul id="cadLayers" class="cadlayers"></ul>
+      </div>
     </section>
 
     <section class="card" id="intro">
@@ -149,6 +159,7 @@
         <button type="button" class="btn" id="bGrade" aria-pressed="false">+ Raise / lower area</button>
         <button type="button" class="btn" id="bWhole">Whole field</button>
         <button type="button" class="btn" id="bTile" aria-pressed="false">+ Drain tile</button>
+        <button type="button" class="btn" id="bRock" aria-pressed="false">+ Rock area</button>
       </div>
       <ul id="editList" class="edits"></ul>
       <dl id="sdStats" class="stats"></dl>

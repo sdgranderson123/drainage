@@ -225,3 +225,84 @@ export function compareSurfaces(survey, lidar) {
   const med = d[d.length >> 1], abs = d.map((v) => Math.abs(v - med)).sort((a, b) => a - b);
   return { n: d.length, median: med, mad: abs[abs.length >> 1], p95: abs[Math.floor(abs.length * 0.95)] };
 }
+
+// ---------------- CAD linework (overlay) ----------------
+// Model-space linework by layer from an ASCII DXF: LINE, LWPOLYLINE, POLYLINE/VERTEX, ARC, CIRCLE, SPLINE.
+// Returns { layers: { name: [{ pts: [[x, y], ...], closed }] } }. Paper-space entities (67 = 1) are skipped.
+export function parseDXFLinework(text) {
+  const lines = text.split(/\r?\n/), layers = {};
+  let i = 0, section = '', ent = null, poly = null;
+  const add = (layer, pts, closed) => { if (pts.length >= 2 && pts.every((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]))) (layers[layer] ||= []).push({ pts, closed: !!closed }); };
+  const arcPts = (cx, cy, r, a0, a1) => {
+    if (a1 <= a0) a1 += 360;
+    const n = Math.max(4, Math.ceil((a1 - a0) / 10)), out = [];
+    for (let k = 0; k <= n; k++) { const a = ((a0 + ((a1 - a0) * k) / n) * Math.PI) / 180; out.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); }
+    return out;
+  };
+  const finish = () => {
+    if (!ent) return;
+    const g = ent.g, f = (c, k = 0) => +(g[c]?.[k]), layer = g[8]?.[0] ?? '0', paper = g[67]?.[0] === '1';
+    if (!paper) switch (ent.type) {
+      case 'LINE': add(layer, [[f(10), f(20)], [f(11), f(21)]]); break;
+      case 'LWPOLYLINE': add(layer, (g[10] || []).map((x, k) => [+x, +g[20][k]]), (+(g[70]?.[0] || 0)) & 1); break;
+      case 'ARC': add(layer, arcPts(f(10), f(20), f(40), f(50), f(51))); break;
+      case 'CIRCLE': add(layer, arcPts(f(10), f(20), f(40), 0, 360), true); break;
+      case 'SPLINE': { const pts = (g[11]?.length ? g[11].map((x, k) => [+x, +g[21][k]]) : (g[10] || []).map((x, k) => [+x, +g[20][k]])); add(layer, pts); break; }
+      case 'POLYLINE': if (!paper) poly = { layer, closed: (+(g[70]?.[0] || 0)) & 1, pts: [] }; break;
+      case 'VERTEX': if (poly) poly.pts.push([f(10), f(20)]); break;
+      case 'SEQEND': if (poly) { add(poly.layer, poly.pts, poly.closed); poly = null; } break;
+    }
+    ent = null;
+  };
+  while (i < lines.length - 1) {
+    const c = +lines[i], v = (lines[i + 1] ?? '').trim(); i += 2;
+    if (c === 0) {
+      finish();
+      if (v === 'SECTION') { section = (lines[i + 1] ?? '').trim(); i += 2; continue; }
+      if (v === 'ENDSEC') { section = ''; continue; }
+      if (section === 'ENTITIES') ent = { type: v, g: {} };
+    } else if (ent) (ent.g[c] ||= []).push(v);
+  }
+  finish();
+  return { layers };
+}
+// Drop shapes far from the main cluster (legends, title blocks drawn near 0,0 in model space).
+export function mainCluster(lin, maxDist) {
+  const xs = [], ys = [];
+  for (const shapes of Object.values(lin.layers)) for (const s of shapes) { xs.push(s.pts[0][0]); ys.push(s.pts[0][1]); }
+  if (!xs.length) return { layers: {}, dropped: 0 };
+  const med = (a) => a.slice().sort((p, q) => p - q)[a.length >> 1], mx = med(xs), my = med(ys);
+  const out = {}; let dropped = 0;
+  for (const [name, shapes] of Object.entries(lin.layers)) {
+    const keep = shapes.filter((s) => s.pts.every(([x, y]) => Math.hypot(x - mx, y - my) <= maxDist));
+    dropped += shapes.length - keep.length; if (keep.length) out[name] = keep;
+  }
+  return { layers: out, dropped, centre: [mx, my] };
+}
+
+// External references (xrefs) a DXF depends on: BLOCK records flagged as xref (70 & 4) with their file path.
+export function dxfXrefs(text) {
+  const lines = text.split(/\r?\n/), out = [];
+  let section = '', inBlock = false, g = {};
+  for (let i = 0; i < lines.length - 1; i += 2) {
+    const c = lines[i].trim(), v = (lines[i + 1] ?? '').trim();
+    if (c === '0') {
+      if (inBlock && (+(g['70'] || 0) & 4)) out.push({ name: g['2'], path: g['1'] || '' });
+      inBlock = false; g = {};
+      if (v === 'SECTION') { section = (lines[i + 3] ?? '').trim(); continue; }
+      if (section === 'BLOCKS' && v === 'BLOCK') inBlock = true;
+    } else if (inBlock && !(c in g)) g[c] = v;
+  }
+  return out;
+}
+// Text in the drawing that names a coordinate system or vertical datum (to help pick the EPSG code).
+export function dxfCrsNotes(text) {
+  const lines = text.split(/\r?\n/), hits = new Set(), re = /\b(State Plane|NAD ?83|NSRS ?2011|NAVD ?(19)?88|NGVD ?(19)?29|Vertical Datum)\b/i;
+  for (let i = 0; i < lines.length - 1; i += 2) {
+    const c = lines[i].trim(); if (c !== '1' && c !== '3') continue; // text strings only
+    const t = lines[i + 1].replace(/\\[A-Za-z][^;]*;|[{}]|\\P/g, ' ').replace(/\s+/g, ' ');
+    if (!re.test(t)) continue;
+    for (const sent of t.split(/(?<=\.)\s+|\s(?=\d\.\s)/)) if (re.test(sent)) hits.add(sent.trim().slice(0, 160));
+  }
+  return [...hits].slice(0, 4);
+}

@@ -1,5 +1,5 @@
 // Browser side of survey import: file reading, LAZ decompression (laz-perf WASM), coordinate systems (proj4 + epsg.io).
-import { parsePoints, parseDXF, parseLandXML, parseLAS, lasHeader, decodeLASPoints, unitToMeters, gridSurvey } from './survey.js';
+import { parsePoints, parseDXF, parseLandXML, parseLAS, lasHeader, decodeLASPoints, unitToMeters, gridSurvey, parseDXFLinework, dxfXrefs, dxfCrsNotes } from './survey.js';
 import { robustFetch } from './dem.js';
 
 const LIB = {
@@ -7,8 +7,12 @@ const LIB = {
   delaunator: 'https://cdn.jsdelivr.net/npm/delaunator@5.0.1/+esm',
   lazperf: 'https://cdn.jsdelivr.net/npm/laz-perf@0.0.6/lib/web/index.js/+esm',
   lazwasm: 'https://cdn.jsdelivr.net/npm/laz-perf@0.0.6/lib/web/',
+  // LibreDWG compiled to WebAssembly (GPL-3.0), loaded only when a DWG is opened (~11 MB).
+  libredwg: 'https://cdn.jsdelivr.net/npm/@mlightcad/libredwg-web@0.8.8/dist/libredwg-web.js',
+  libredwgWasm: 'https://cdn.jsdelivr.net/npm/@mlightcad/libredwg-web@0.8.8/wasm',
 };
-let proj4P, delP, lazP;
+let proj4P, delP, lazP, dwgP;
+const libredwg = () => (dwgP ||= import(LIB.libredwg).then((m) => m.LibreDwg.create(LIB.libredwgWasm)));
 const proj4 = () => (proj4P ||= import(LIB.proj4).then((m) => m.default || m));
 export const Delaunator = () => (delP ||= import(LIB.delaunator).then((m) => m.default || m));
 const lazModule = () => (lazP ||= import(LIB.lazperf).then((m) => (m.createLazPerf || m.default?.createLazPerf || m.default)({ locateFile: (p) => LIB.lazwasm + p })));
@@ -24,7 +28,14 @@ export function fileKind(name) {
 // Read and parse one file. Returns the parsed survey plus a description.
 export async function readSurvey(file, { order = 'PNEZD', onProgress } = {}) {
   const kind = fileKind(file.name);
-  if (kind === 'dwg') throw new Error('DWG is a closed Autodesk format that cannot be read in a browser. In Civil 3D / AutoCAD use Save As → DXF, or export the surface as LandXML or the points as a PNEZD .csv.');
+  if (kind === 'dwg') {
+    onProgress?.('Loading the DWG reader (first time ~11 MB)…');
+    const lib = await libredwg();
+    onProgress?.(`Converting ${file.name}…`);
+    const out = lib.dwg_write_dxf(new Uint8Array(await file.arrayBuffer()));
+    if (!out) throw new Error(`${file.name} could not be read. Try Save As → DXF (AutoCAD 2018 DXF) in AutoCAD / Civil 3D.`);
+    return cadResult(new TextDecoder('latin1').decode(out), file.name);
+  }
   if (kind === 'las' || kind === 'laz') {
     const buf = await file.arrayBuffer(), h = lasHeader(buf);
     if (!h.compressed) return { ...parseLAS(buf), name: file.name };
@@ -42,9 +53,16 @@ export async function readSurvey(file, { order = 'PNEZD', onProgress } = {}) {
     } finally { z.delete(); L._free(fp); }
   }
   const text = await file.text();
-  if (kind === 'dxf') return { ...parseDXF(text), name: file.name };
+  if (kind === 'dxf') return cadResult(text, file.name);
   if (kind === 'landxml') return { ...parseLandXML(text), name: file.name };
   return { ...parsePoints(text, order), name: file.name };
+}
+
+// CAD drawing: 3D points/faces (if any), plan linework by layer, external references, coordinate notes.
+function cadResult(text, name) {
+  let pts = { xyz: new Float64Array(0), kind: 'points' };
+  try { pts = parseDXF(text); } catch (e) { if (/Binary/.test(e.message)) throw e; }
+  return { ...pts, name, cad: true, linework: parseDXFLinework(text), xrefs: dxfXrefs(text), crsNotes: dxfCrsNotes(text) };
 }
 
 // proj4 definition for an EPSG code (epsg.io, then spatialreference.org).

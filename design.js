@@ -1,6 +1,6 @@
 // Site design edits on a lidar grid: ponds, raise/lower areas, drain tile. Pure functions, tested.
 // Edits are stored as lat/lon geometry so they can be applied to any grid (field view, storm grid).
-import { toLocal, pointInPolygon } from './earthwork.js';
+import { toLocal, pointInPolygon, polygonArea } from './earthwork.js';
 
 const FT = 0.3048;
 
@@ -89,6 +89,11 @@ export function applyEdits(dem, base, edits) {
       }
       const A = dem.dx * dem.dy;
       info.push({ type: 'pond', cells: n, areaM2: n * A, rim, bottom, excavationM3: exc * A, storageM3: storage * A, bottomM2: botCells * A });
+    } else if (e.type === 'rock') {
+      // Rock surfacing: no change to the grade here; area for the quantity.
+      // Area from the outline's exact geometry (not counted grid cells) because it drives a material quantity.
+      const m = rasterPolygon(dem, e.pts); let n = 0; for (let i = 0; i < m.length; i++) if (m[i]) n++;
+      info.push({ type: 'rock', cells: n, areaM2: polygonArea(localPts(dem, e.pts).P) });
     } else if (e.type === 'tile') {
       const cells = rasterLine(dem, e.pts);
       const ok = cells.filter((i) => Number.isFinite(base[i]));

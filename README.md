@@ -34,6 +34,14 @@ Static files, no build step, no backend.
   survey covers, in every tool. On import the survey is compared with the lidar: a consistent offset flags a
   datum or units problem. DWG can't be read in a browser: save as DXF or export LandXML.
   Accuracy is the survey's: elevations are interpolated linearly between shots (TIN) or averaged per cell (clouds).
+- **Design files**: pick a DWG (read in the browser with LibreDWG, loaded on first use, about 11 MB) or DXF and its
+  xrefs together. Plan linework is drawn on the map by layer (toggle list; legends and title blocks away from the
+  site are skipped), missing xrefs are named, and the drawing's own coordinate-system note is quoted to help pick
+  the EPSG code. Click a closed shape to use it as the field outline, a rock surfacing area (depth in inches and
+  tons/yd³ → yd³ and tons, from the exact outline), a raise/lower area or a pond. Choose **Proposed design** to load
+  a finished-grade surface (LandXML FG or a DXF with elevations): it becomes the design for cut/fill, drainage
+  paths and Storm 3D. Civil 3D surfaces only come through via LandXML export.
+  Licence note: LibreDWG is GPL-3.0; it is loaded from a CDN only when a DWG is opened.
 - **Storm 3D** now shows the water moving: tracer particles ride the simulated flow and rain falls at the
   current intensity.
 - **Drainage area & peak flow** (press **D**): click a culvert, tile outlet or ditch point. Delineates the
