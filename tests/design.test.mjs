@@ -81,3 +81,8 @@ test('groupExits merges an edge of small exits', () => {
   const g = groupExits(ex, 100, 1, 1, 30);
   assert.equal(g.length, 3); assert.equal(g.reduce((a, x) => a + x.cells, 0), 55);
 });
+
+test('rock area is the exact outline area', () => {
+  const { info } = applyEdits(dem, flat(10), [{ type: 'rock', pts: square(-50, -30, 50, 30), depthIn: 9 }]);
+  near(info[0].areaM2, 6000, 1);
+});

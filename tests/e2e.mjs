@@ -376,11 +376,60 @@ console.log('Survey import: replaces lidar with surveyed elevations');
   }
   const page = await newPage();
   await page.click('#bSurvey');
-  await page.setInputFiles('#svFile', { name: 'site.dwg', mimeType: 'application/acad', buffer: Buffer.from('AC1032 binary') });
+  await page.setInputFiles('#svFile', { name: 'site.dwg', mimeType: 'application/acad', buffer: Buffer.from('AC1032 not really a drawing') });
+  await page.click('#svLoad');
+  await page.waitForFunction(() => document.querySelector('#status').classList.contains('err'), null, { timeout: 120000 });
+  check(/could not be read|DXF/.test(await page.textContent('#status')), 'a broken DWG gives a clear message', await page.textContent('#status'));
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
+console.log('Design import: CAD linework, closed shapes, rock, proposed (FG) surface');
+{
+  surface = plane; const page = await newPage();
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', 'site_plan.dxf'));
+  await page.selectOption('#svRole', 'linework');
+  await page.selectOption('#svCrs', 'auto');
   await page.click('#svLoad');
   await page.waitForFunction(() => document.querySelector('#status').classList.contains('err'), null, { timeout: 20000 });
-  check(/DXF/.test(await page.textContent('#status')), 'DWG explains how to export DXF / LandXML instead');
+  check(/Mississippi State Plane, West Zone/.test(await page.textContent('#status')), 'no CRS in the file: error quotes the drawing note to help pick the code');
+  await page.fill('#svEpsg', '2255'); await page.click('#svLoad');
+  await page.waitForFunction(() => window.__fg.cad && window.__fg.busy === 0, null, { timeout: 30000 });
+  const cadInfo = await page.evaluate(() => ({ layers: Object.keys(window.__fg.cad.layers), dropped: window.__fg.cad.dropped }));
+  check(cadInfo.layers.join() === 'C-FENCE,C-ROCK,C-UTIL-STRM-DRAINTILE' && cadInfo.dropped === 1, `linework layers ${cadInfo.layers.join(', ')}; legend skipped (${cadInfo.dropped})`);
+  check(/SITE-TOPO\.dwg/.test(await page.textContent('#svResult')), 'warns about the missing xref by file name');
+  // Click the fence (closed) -> use as field outline
+  const clickShape = async (lat, lon, act) => {
+    const pt = await page.evaluate(([a, b]) => { const p = window.__fg.map.latLngToContainerPoint([a, b]); return [p.x, p.y]; }, [lat, lon]);
+    const box = await page.locator('#map').boundingBox();
+    await page.mouse.click(box.x + pt[0], box.y + pt[1]);
+    await page.waitForSelector(`.cadpop [data-act=${act}]`, { timeout: 5000 });
+    await page.click(`.cadpop [data-act=${act}]`);
+  };
+  // fence edge: x = 80 m east of the centre, y = 45 m north (outside the rock area)
+  await page.evaluate(([a, b]) => window.__fg.map.setView([a, b], 17, { animate: false }), [LAT0, LON0]);
+  await clickShape(LAT0 + 45 / 111194.9, LON0 + 80 / (111194.9 * Math.cos(LAT0 * Math.PI / 180)), 'field');
+  await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.design && window.__fg.busy === 0, null, { timeout: 60000 });
+  const fa = await page.evaluate(() => window.__fg.field.area);
+  check(near(fa, 160 * 120, 160 * 120 * 0.02), `fence used as field outline (${(fa / 4046.86).toFixed(2)} ac ≈ ${(19200 / 4046.86).toFixed(2)} ac)`);
+  // rock edge: x = 50, y = 20 (away from the tile line at y = 0)
+  await clickShape(LAT0 + 20 / 111194.9, LON0 + 50 / (111194.9 * Math.cos(LAT0 * Math.PI / 180)), 'rock');
+  await page.waitForFunction(() => window.__fg.design?.info.length === 1 && window.__fg.busy === 0, null, { timeout: 60000 });
+  const rk = await page.evaluate(() => window.__fg.design.info[0]);
+  const expYd = 100 * 60 * 9 * 0.0254 * 1.30795;
+  check(rk.type === 'rock' && near(rk.areaM2, 6000, 6), `rock area ${Math.round(rk.areaM2)} m² ≈ 6000 m² (exact outline)`);
+  const rs = await page.textContent('#sdStats'), yd = +rs.match(/Rock surfacing([\d,]+) yd³/)[1].replace(/,/g, '');
+  check(near(yd, expYd, expYd * 0.002 + 1), `rock quantity ${yd} yd³ at 9 in ≈ ${Math.round(expYd)} yd³; tons shown`, rs);
+  // Proposed design surface: the +0.10 m LandXML TIN as FG -> fill ≈ area × 0.10 m inside its coverage
+  await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', 'survey_tin.xml'));
+  await page.selectOption('#svRole', 'design'); await page.selectOption('#svCrs', 'auto');
+  await page.click('#svLoad');
+  await page.waitForFunction(() => window.__fg.designSurf && window.__fg.design?.fgCells > 0 && window.__fg.busy === 0, null, { timeout: 120000 });
+  const fg = await page.evaluate(() => { const d = window.__fg.design, f = window.__fg.field; let n = 0, s = 0; for (let i = 0; i < d.z.length; i++) if (f.mask[i]) { const v = d.z[i] - f.dem.data[i]; if (Math.abs(v) > 1e-6) { n++; s += v; } } return { n, mean: s / n }; });
+  check(near(fg.mean, 0.10, 0.01), `design surface raises the field by ${fg.mean.toFixed(3)} m ≈ 0.10 m (FG − existing)`);
+  check(/Proposed design surface/.test(await page.textContent('#sdStats')), 'site design summary names the design surface');
   check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-design-import.png') });
   await page.context().close();
 }
 console.log('Storm 3D: moving water and rain');

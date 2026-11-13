@@ -62,6 +62,12 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .status.err { color: var(--cut); }
 .okline { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--acc-soft); }
 #svResult { margin-top: 10px; display: grid; gap: 6px; }
+ul.cadlayers { list-style: none; margin: 6px 0 0; padding: 0; max-height: 240px; overflow: auto; display: grid; gap: 2px; font-size: 13px; }
+ul.cadlayers label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+ul.cadlayers .sw { width: 14px; height: 4px; border-radius: 2px; flex: none; }
+ul.cadlayers small { color: var(--muted); margin-left: auto; }
+.cadpop { display: grid; gap: 6px; min-width: 170px; } .cadpop b { font-size: 13px; }
+.cadpop button { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; text-align: left; }
 input[type=file] { font: inherit; font-size: 13px; }
 .steps { margin: 0; padding-left: 20px; } .steps li { margin: 4px 0; }
 
@@ -118,6 +124,12 @@ li.edit { border: 1px solid var(--line); border-radius: 8px; padding: 8px; displ
 .err { color: var(--cut); }
 .okline { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--acc-soft); }
 #svResult { margin-top: 10px; display: grid; gap: 6px; }
+ul.cadlayers { list-style: none; margin: 6px 0 0; padding: 0; max-height: 240px; overflow: auto; display: grid; gap: 2px; font-size: 13px; }
+ul.cadlayers label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+ul.cadlayers .sw { width: 14px; height: 4px; border-radius: 2px; flex: none; }
+ul.cadlayers small { color: var(--muted); margin-left: auto; }
+.cadpop { display: grid; gap: 6px; min-width: 170px; } .cadpop b { font-size: 13px; }
+.cadpop button { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; text-align: left; }
 input[type=file] { font: inherit; font-size: 13px; }
 /* While drawing, markers and shapes must not swallow clicks meant for new points. */
 .drawing .leaflet-marker-icon, .drawing .leaflet-interactive { pointer-events: none !important; }
