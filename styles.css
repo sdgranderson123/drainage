@@ -26,6 +26,14 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .brand { margin: 0; display: flex; gap: 8px; align-items: center; font-weight: 700; font-size: 17px; letter-spacing: .2px; }
 .brand svg { width: 26px; height: 26px; } .brand rect { fill: var(--acc); }
 .brand path { stroke: #fff; stroke-width: 3; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.pjbar { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.pjname { font-weight: 600; font-size: 13px; color: var(--muted); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 4px; }
+.btn.sm { padding: 4px 9px; font-size: 13px; }
+.btn.sm.icon { padding: 4px 6px; }
+.pjdlg { border: 1px solid var(--line); border-radius: var(--r); background: var(--card); color: var(--fg); width: min(460px, calc(100vw - 32px)); padding: 16px; box-shadow: 0 10px 40px rgb(0 0 0 / .35); }
+.pjdlg::backdrop { background: rgb(0 0 0 / .35); }
+ul.pjlist { list-style: none; padding: 0; margin: 0 0 10px; display: grid; gap: 6px; max-height: 50vh; overflow: auto; }
+ul.pjlist li { display: flex; gap: 10px; align-items: baseline; } ul.pjlist small { color: var(--muted); flex: 1; }
 .search { display: flex; gap: 6px; flex: 1; max-width: 520px; }
 .search input { flex: 1; min-width: 0; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
 
@@ -192,6 +200,7 @@ table.cmp td.good { color: var(--acc); font-weight: 600; } table.cmp td.bad { co
 @media (max-width: 760px) {
   .top { flex-wrap: wrap; gap: 8px; }
   .search { max-width: none; flex-basis: 100%; }
+  .pjname { display: none; }
   html, body { height: auto; }
   .app { flex-direction: column; }
   .mapwrap { flex: none; height: 58vh; }

@@ -14,6 +14,15 @@
 <body>
 <header class="top">
   <h1 class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M4 22l8-7 5 4 11-10"/></svg><span>FieldGrade</span></h1>
+  <nav class="pjbar" aria-label="Project">
+    <span id="pjName" class="pjname">Untitled project</span>
+    <button type="button" class="btn sm" id="pjNew">New</button>
+    <button type="button" class="btn sm" id="pjOpen">Open</button>
+    <button type="button" class="btn sm" id="pjSave" title="Ctrl+S">Save</button>
+    <button type="button" class="btn sm" id="pjExport">Export</button>
+    <button type="button" class="btn sm icon" id="pjUndo" title="Undo (Ctrl+Z)" aria-label="Undo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7L4 12l5 5"/><path d="M4 12h10a6 6 0 0 1 0 12h-2"/></svg></button>
+    <button type="button" class="btn sm icon" id="pjRedo" title="Redo (Ctrl+Y)" aria-label="Redo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7l5 5-5 5"/><path d="M20 12H10a6 6 0 0 0 0 12h2"/></svg></button>
+  </nav>
   <form id="search" class="search" role="search">
     <label class="sr" for="q">Find a place or coordinates</label>
     <input id="q" type="search" placeholder="Address, town, or lat, lon" autocomplete="off">
@@ -99,6 +108,10 @@
       <div id="svScanResult" class="small"></div>
       <div class="row"><button type="button" class="btn primary" id="svLoad">Load files</button><button type="button" class="btn" id="svRemove" hidden>Remove all</button></div>
       <div id="svResult" class="small"></div>
+      <div class="row">
+        <button type="button" class="btn" id="svDrawOutline">Draw site outline</button>
+        <button type="button" class="btn" id="svAutoOutline">Use the drawing's outline</button>
+      </div>
       <div id="svNext" class="row" hidden>
         <button type="button" class="btn primary" id="sv3dStorm">Storm 3D: existing vs proposed</button>
         <button type="button" class="btn" id="sv3d">3D view</button>
@@ -210,6 +223,11 @@
       Estimates only — check against a survey before bidding or moving dirt.</p>
   </aside>
 </main>
+
+<dialog id="pjDlg" class="pjdlg" aria-labelledby="pjDlgTitle">
+  <div class="cardhead"><h2 id="pjDlgTitle">Project</h2><button type="button" class="link" id="pjDlgClose" aria-label="Close">✕</button></div>
+  <div id="pjDlgBody"></div>
+</dialog>
 
 <div id="storm" class="storm" hidden role="dialog" aria-modal="true" aria-labelledby="stTitle">
   <div class="sthead">
