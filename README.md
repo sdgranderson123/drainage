@@ -42,6 +42,17 @@ Static files, no build step, no backend.
   a finished-grade surface (LandXML FG or a DXF with elevations): it becomes the design for cut/fill, drainage
   paths and Storm 3D. Civil 3D surfaces only come through via LandXML export.
   Licence note: LibreDWG is GPL-3.0; it is loaded from a CDN only when a DWG is opened.
+- **Coordinate system: Automatic.** Tries all 879 US state plane (NAD27/NAD83/HARN/2011, ft/ftUS/m), UTM and Iowa
+  regional systems in `crs-us.json` (built from epsg.io), keeps the ones that put the data inside their own area of
+  use, and ranks them by the drawing notes, `.prj` files from a scanned folder, optional state/county, and the map
+  location. The pick is shown with a list of alternatives.
+- **Scan a project folder**: pick a folder; it lists LAS/LAZ, LandXML, point files, DXF/DWG and .prj files with
+  EPSG codes and notes, and loads the checked ones. Files are read in the browser only.
+- **3D view / Storm 3D: existing vs proposed** side by side with locked cameras and one storm clock, satellite imagery
+  or elevation colours, the outline, CAD lines and edits draped on the ground, regraded areas tinted, and a
+  comparison table (change in runoff leaving the site, peak flow, deep water). Tracer particles with trails show
+  surface water running down slope into low areas and ponds.
+- **Profiles** show the proposed grade with cut/fill shading when a design exists.
 - **Storm 3D** now shows the water moving: tracer particles ride the simulated flow and rain falls at the
   current intensity.
 - **Drainage area & peak flow** (press **D**): click a culvert, tile outlet or ditch point. Delineates the

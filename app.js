@@ -1,7 +1,8 @@
 import { toLocal, pointInPolygon, polygonArea, fitPlane, planeFromSlope, slopeOf, designZ, volumes, balance,
   profileStats, quantile, hillshade, rampColor, toCSV, parseLatLon, M_TO_FT, M3_TO_YD3, M2_TO_AC } from './earthwork.js';
 import { fetchDEM as fetchLidar, sample, pointElevation, geocode, lidarSource, robustFetch } from './dem.js';
-import { readSurvey, epsgDef, utmEPSG, transformFor, surveyExtent, gridSurvey, Delaunator } from './surveyio.js';
+import { readSurvey, epsgDef, utmEPSG, transformFor, surveyExtent, gridSurvey, Delaunator, loadProj4, crsTable, scanFolder } from './surveyio.js';
+import { detectCRS, prjToNotes } from './crs.js';
 import { compareSurfaces, mainCluster } from './survey.js';
 import { fillDepressions, d8, accumulate, snapOutlet, watershed, flowPath, scsRunoff, tcLag, tcKirpich, tr55Peak, LAND_USE } from './hydro.js';
 import { openStorm } from './storm3d.js';
@@ -108,10 +109,31 @@ $('svFile').onchange = () => {
 $('svCrs').onchange = () => { $('svEpsg').hidden = $('svCrs').value !== 'epsg'; };
 try { const e = localStorage.getItem('fg:lastEpsg'); if (e) $('svEpsg').value = e; } catch { /* ignore */ }
 $('svLoad').onclick = () => importSurvey();
+$('svScan').onclick = () => $('svFolder').click();
+$('svFolder').onchange = async () => {
+  const files = [...$('svFolder').files]; if (!files.length) return;
+  await withBusy(async () => {
+    status(`Searching ${files.length.toLocaleString()} files…`);
+    const { found, notes } = await scanFolder(files);
+    folderNotes = notes;
+    if (!found.length) { $('svScanResult').innerHTML = '<div class="warn">No survey, lidar or drawing files found in that folder.</div>'; status(''); return; }
+    const label = { las: 'Lidar (LAS)', laz: 'Lidar (LAZ)', landxml: 'LandXML', points: 'Point file', dxf: 'DXF drawing', dwg: 'DWG drawing', prj: 'Coordinate system (.prj)' };
+    const order = ['las', 'laz', 'landxml', 'points', 'dxf', 'dwg', 'prj'];
+    found.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind) || a.path.localeCompare(b.path));
+    const mb = (n) => (n > 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.ceil(n / 1e3)} KB`);
+    $('svScanResult').innerHTML = `<div><b>Found ${found.filter((f) => f.kind !== 'prj').length} usable files</b>${notes.length ? ` and coordinate clues: “${prjToNotes(notes[0]).slice(0, 120)}”` : ''}.</div>
+      <ul class="scanlist">${found.map((f, k) => `<li><label><input type="checkbox" data-scan="${k}" ${f.kind === 'prj' ? 'disabled' : ['las', 'laz', 'landxml', 'points'].includes(f.kind) ? 'checked' : ''}>
+        <span><b>${label[f.kind]}</b> ${f.path}<small> · ${mb(f.size)}${f.epsg ? ` · EPSG:${f.epsg}` : ''}${f.note ? ` · ${f.note.replace(/</g, '&lt;').slice(0, 80)}` : ''}</small></span></label></li>`).join('')}</ul>
+      <div class="row"><button type="button" class="btn primary" id="svLoadScan">Load checked files</button></div>`;
+    $('svLoadScan').onclick = () => importSurvey([...$('svScanResult').querySelectorAll('[data-scan]:checked')].map((cb) => found[+cb.dataset.scan].file));
+    status('');
+  });
+};
 $('svRemove').onclick = () => { for (const e of [survey, designSurf]) (e?.layers || []).forEach((l) => map.removeLayer(l)); survey = null; designSurf = null; clearCad(); $('svResult').innerHTML = ''; $('svRemove').hidden = true; reloadAllSurfaces(); };
 let designSurf = null, cad = null;
-async function importSurvey() {
-  const files = [...$('svFile').files];
+let folderNotes = [];
+async function importSurvey(filesOverride) {
+  const files = filesOverride || [...$('svFile').files];
   if (!files.length) { status('Choose a file first.', true); return; }
   const role = $('svRole').value;
   await withBusy(async () => {
@@ -123,10 +145,19 @@ async function importSurvey() {
     if (pick === 'epsg') { code = parseInt($('svEpsg').value, 10); how = 'entered'; if (!code) throw new Error('Enter the EPSG code of the coordinate system.' + (notes.length ? ` The drawing says: “${notes[0]}”.` : '')); }
     else if (pick === 'utm') { code = utmEPSG(map.getCenter().lng); how = 'UTM for the map location'; }
     else { const p = parsed.find((x) => x.epsg); if (p) { code = p.epsg; how = 'read from the file'; } }
+    let guess = null;
     if (!code) {
-      $('svCrs').value = 'epsg'; $('svEpsg').hidden = false;
-      throw new Error('These files don’t say which coordinate system they use. Choose “EPSG code” and enter it' +
-        (notes.length ? `. The drawing notes say: “${notes[0]}”` : ' from the survey notes') + ' (for example NAD83(2011) Minnesota South, US ft = 6505; NAD83 Iowa North, US ft = 3417).');
+      // Work it out: try every US state plane / UTM / regional system and keep the ones that put the data in
+      // their own area of use, ranked by the drawing notes, the folder's .prj files, state/county and the map.
+      status('Working out the coordinate system…');
+      const xy = sampleXY(parsed);
+      if (!xy.length) throw new Error('No coordinates found to place on the map.');
+      const notesAll = [...notes, ...folderNotes.map(prjToNotes)].join(' . ');
+      const c = map.getCenter(), cands = detectCRS(xy, await crsTable(), await loadProj4(), { notes: notesAll, lat: c.lat, lon: c.lng, state: $('svState').value.trim(), county: $('svCounty').value.trim() });
+      if (!cands.length) throw new Error('These coordinates don’t fit any US state plane or UTM system. They may be on a local (assumed) grid; the surveyor would need to provide the transformation.');
+      guess = cands; code = cands[0].code;
+      how = cands[0].why.length ? `auto-detected from ${cands[0].why.join(', ')}` : cands[0].km != null && cands[0].km < 30 ? 'auto-detected: lands where the map is' : 'best guess: please confirm';
+      $('svEpsg').value = String(code);
     }
     try { localStorage.setItem('fg:lastEpsg', String(code)); } catch { /* ignore */ }
     status(`Looking up EPSG:${code}…`);
@@ -160,10 +191,31 @@ async function importSurvey() {
     const missing = parsed.flatMap((p) => p.xrefs || []).filter((x) => !have.has(x.name.toLowerCase()) && !have.has((x.path.split(/[\\/]/).pop() || '').toLowerCase().replace(/\.dwg$/, '')));
     if (missing.length) msgs.push(`<div class="warn">This drawing pulls in ${missing.length} external reference${missing.length > 1 ? 's' : ''} that ${missing.length > 1 ? 'were' : 'was'} not included: ${missing.map((x) => `<b>${x.path.split(/[\\/]/).pop() || x.name}</b>`).join(', ')}. The site plan, topo and surfaces usually live there. Add those files too (pick them all at once), or use eTransmit / XREF → Bind in AutoCAD.</div>`);
     if (lw.length && cad) msgs.push(`Drawing linework: ${cad.count.toLocaleString()} shapes on ${Object.keys(cad.layers).length} layers${cad.dropped ? ` (${cad.dropped} legend/title shapes away from the site skipped)` : ''}.`);
+    if (guess) msgs.unshift(suggestHTML(guess, code));
+    else if (how) msgs.unshift(`<div>Coordinate system EPSG:${code} (${how}).</div>`);
     $('svResult').innerHTML = msgs.join(''); $('svRemove').hidden = false; status('');
+    const sel = $('svSuggest'); if (sel) sel.onchange = () => { $('svCrs').value = 'epsg'; $('svEpsg').hidden = false; $('svEpsg').value = sel.value; importSurvey(files); };
     if (cad?.bounds && !withZ.length) map.fitBounds(cad.bounds, { padding: [60, 60], maxZoom: 19, animate: false });
     reloadAllSurfaces();
   }, importSurvey);
+}
+// A few coordinates from whatever was loaded (survey points, else drawing linework).
+function sampleXY(parsed) {
+  const out = [];
+  for (const p of parsed) {
+    const n = p.xyz.length / 3; for (let k = 0; k < n && out.length < 40; k += Math.max(1, Math.floor(n / 20))) out.push([p.xyz[k * 3], p.xyz[k * 3 + 1]]);
+    if (p.linework && out.length < 40) {
+      const m = mainCluster(p.linework, 20000);
+      for (const shapes of Object.values(m.layers)) for (const sh of shapes) { out.push(sh.pts[0]); if (out.length >= 40) break; }
+    }
+  }
+  return out;
+}
+function suggestHTML(c, code) {
+  const top = c[0], km = (x) => (x.km == null ? '' : x.km < 1 ? ', where the map is' : `, ${x.km < 10 ? x.km.toFixed(1) : Math.round(x.km)} km from the map`);
+  return `<div class="okline"><b>Coordinate system: ${top.name}</b> (EPSG:${code})${top.why.length ? ` — matches ${top.why.join(', ')}` : ''}${km(top)}.
+    <label class="small">Not right? Other systems that fit these coordinates:
+    <select id="svSuggest">${c.slice(0, 8).map((x) => `<option value="${x.code}"${x.code === code ? ' selected' : ''}>${x.name} (EPSG:${x.code})${km(x)}</option>`).join('')}</select></label></div>`;
 }
 function surveyResultHTML(entry, role, how) {
   const { sv, code, cmp } = entry, n = sv.xyz.length / 3;
@@ -476,7 +528,8 @@ function computeProfile() {
       const a = pts[i - 1], c = pts[i], seg = map.distance(a, c), n = Math.max(1, Math.ceil(seg / Math.max(0.5, profile.dem.dx)));
       for (let k = i === 1 ? 0 : 1; k <= n; k++) {
         const t = k / n, lat = a.lat + (c.lat - a.lat) * t, lon = a.lng + (c.lng - a.lng) * t;
-        rows.push({ d: dist + seg * t, lat, lon, z: sample(profile.dem, lat, lon) });
+        const zp = design && field?.dem && designChanged() ? sample({ ...field.dem, data: design.z }, lat, lon) : NaN;
+        rows.push({ d: dist + seg * t, lat, lon, z: sample(profile.dem, lat, lon), zp });
       }
       dist += seg;
     }
@@ -503,7 +556,9 @@ function computeProfile() {
 function chartGeom() {
   const c = $('prof'), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
   if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
-  const st = profile.stats, lo = st.lo * M_TO_FT, hi = st.hi * M_TO_FT, pad = Math.max(0.25, (hi - lo) * 0.08);
+  const st = profile.stats; let lo = st.lo * M_TO_FT, hi = st.hi * M_TO_FT;
+  for (const r of profile.rows) if (Number.isFinite(r.zp)) { lo = Math.min(lo, r.zp * M_TO_FT); hi = Math.max(hi, r.zp * M_TO_FT); }
+  const pad = Math.max(0.25, (hi - lo) * 0.08);
   const L0 = 44, R0 = 10, T0 = 10, B0 = 22;
   const X = (d) => L0 + (d / profile.dist) * (W - L0 - R0);
   const Y = (zft) => T0 + (1 - (zft - (lo - pad)) / (hi - lo + 2 * pad)) * (H - T0 - B0);
@@ -536,6 +591,18 @@ function drawProfile(cursorIdx = -1) {
     run = [];
   };
   for (const r of rows) { if (Number.isFinite(r.z)) run.push(r); else flush(); } flush();
+  // Proposed grade along the same line (where the design covers it), with cut/fill shading between the two.
+  if (rows.some((r) => Number.isFinite(r.zp) && Math.abs(r.zp - r.z) > 0.003)) {
+    for (let k = 1; k < rows.length; k++) {
+      const a = rows[k - 1], b = rows[k]; if (!(Number.isFinite(a.zp) && Number.isFinite(b.zp) && Number.isFinite(a.z) && Number.isFinite(b.z))) continue;
+      g.beginPath(); g.moveTo(X(a.d), Y(a.z * M_TO_FT)); g.lineTo(X(b.d), Y(b.z * M_TO_FT)); g.lineTo(X(b.d), Y(b.zp * M_TO_FT)); g.lineTo(X(a.d), Y(a.zp * M_TO_FT)); g.closePath();
+      g.fillStyle = (a.zp + b.zp) > (a.z + b.z) ? 'rgba(45,104,196,0.35)' : 'rgba(200,66,58,0.35)'; g.fill();
+    }
+    g.strokeStyle = '#e07b00'; g.lineWidth = 2.5; g.beginPath(); let on = false;
+    for (const r of rows) { if (!Number.isFinite(r.zp)) { on = false; continue; } (on ? g.lineTo : g.moveTo).call(g, X(r.d), Y(r.zp * M_TO_FT)); on = true; }
+    g.stroke();
+    $('profKey').hidden = false;
+  } else $('profKey').hidden = true;
   // vertex markers on the chart
   let d = 0; g.strokeStyle = line; g.setLineDash([3, 3]);
   for (let i = 1; i < profile.pts.length - 1; i++) { d += map.distance(profile.pts[i - 1], profile.pts[i]); g.beginPath(); g.moveTo(X(d), g0.T0); g.lineTo(X(d), H - g0.B0); g.stroke(); }
@@ -555,7 +622,7 @@ function profileCursor(clientX) {
   profile.rows.forEach((r, i) => { const dd = Math.abs(X(r.d) - x); if (dd < bd) { bd = dd; best = i; } });
   const r = profile.rows[best];
   drawProfile(best);
-  $('profTip').textContent = Number.isFinite(r.z) ? `${fmt(r.d * M_TO_FT)} ft along · ${ft(r.z)} ft elevation` : `${fmt(r.d * M_TO_FT)} ft along · no lidar`;
+  $('profTip').textContent = Number.isFinite(r.z) ? `${fmt(r.d * M_TO_FT)} ft along · ${ft(r.z)} ft existing${Number.isFinite(r.zp) && Math.abs(r.zp - r.z) > 0.003 ? ` · ${ft(r.zp)} ft proposed (${r.zp > r.z ? 'fill' : 'cut'} ${ft(Math.abs(r.zp - r.z))} ft)` : ''}` : `${fmt(r.d * M_TO_FT)} ft along · no lidar`;
   if (!profile.cursor) profile.cursor = L.circleMarker([r.lat, r.lon], { radius: 6, color: '#1c2420', weight: 2, fillColor: '#ffd400', fillOpacity: 1, interactive: false }).addTo(map);
   else profile.cursor.setLatLng([r.lat, r.lon]);
 }
@@ -777,6 +844,7 @@ function refreshDesign() {
       });
     }
     drawEditShapes(); renderEditList(); designSummary();
+    if (profile?.stats) computeProfile();
     field.edit.shape.bringToFront();
     status('');
   }, refreshDesign);
@@ -815,13 +883,29 @@ function designSummary() {
     ${tiles.length ? `<dt>Tile capacity</dt><dd>${tiles.reduce((a, t) => a + t.capacityCfs, 0).toFixed(2)} cfs</dd>` : ''}`;
   showWetlandResult();
 }
-function openDesignStorm() {
+function designChanged() {
+  if (!design || !field?.dem) return false;
+  const a = field.dem.data, z = design.z; for (let i = 0; i < z.length; i++) if (Math.abs(z[i] - a[i]) > 0.003) return true;
+  return false;
+}
+// Storm (or still 3D view) on the field: existing ground and, when there is a design, the proposed grade beside it.
+function openDesignStorm({ autoplay = true } = {}) {
   if (!field?.dem || !design) return;
   const sinks = design.info.filter((i) => i.type === 'tile' && i.cells?.length).map((i) => ({ cells: i.cells, capM3s: i.capacityCfs * 0.0283168 }));
-  openStorm({ ...field.dem, data: surfaceMode() === 'design' || edits.length ? design.z : field.dem.data },
-    { title: `Storm on the ${(field.area * M2_TO_AC).toFixed(0)}-acre field${edits.length ? ' (with your changes)' : ''}`, mask: field.mask, sinks, depthIn: designDepth(), CN: +$('cn').value || 78, maxCells: 128 });
+  const changed = designChanged(), d = field.dem;
+  // Lines draped on the ground: CAD layers that are switched on (near the field) and the design edits.
+  const lines = [], fb = L.latLngBounds(field.pts).pad(0.6);
+  if (cad) for (const [, l] of Object.entries(cad.layers)) if (map.hasLayer(l.group)) l.group.eachLayer((shape) => {
+    const ll = shape.getLatLngs(), ring = Array.isArray(ll[0]) ? ll[0] : ll;
+    if (ring.length >= 2 && fb.contains(ring[0])) lines.push({ pts: ring.map((p) => [p.lat, p.lng]), color: l.color, closed: shape instanceof L.Polygon });
+  });
+  for (const e of edits) lines.push({ pts: e.pts, color: EDIT_COLORS[e.type], closed: e.type !== 'tile' });
+  openStorm(d, { proposed: changed ? design.z : null, outline: field.pts.map((p) => [p.lat, p.lng]), lines, autoplay,
+    title: `${autoplay ? 'Storm on' : '3D view of'} the ${(field.area * M2_TO_AC).toFixed(0)}-acre site${changed ? ': existing vs proposed' : ''}`,
+    mask: field.mask, sinks, depthIn: designDepth(), CN: +$('cn').value || 78, maxCells: 128 });
 }
-$('sdStorm').onclick = openDesignStorm;
+$('sdStorm').onclick = () => openDesignStorm();
+$('sd3d').onclick = () => openDesignStorm({ autoplay: false });
 
 // NWI wetlands (USFWS National Wetlands Inventory). Mapped wetlands are a screening layer, not a delineation.
 const NWI = 'https://fwspublicservices.wim.usgs.gov/wetlandsmapservice/rest/services/Wetlands/MapServer/0/query';

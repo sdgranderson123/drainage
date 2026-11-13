@@ -97,3 +97,37 @@ export function surveyExtent(sv, toLL) {
 }
 
 export { gridSurvey };
+export const loadProj4 = proj4;
+let tableP;
+export const crsTable = () => (tableP ||= fetch('crs-us.json').then((r) => r.json()));
+
+// Look through a picked folder: what survey/design files are there, and what do they say about coordinates.
+export async function scanFolder(files) {
+  const found = [], notes = [];
+  const kindOf = (n) => { const k = fileKind(n); return /\.(prj)$/i.test(n) ? 'prj' : /\.(txt|csv|pnezd|xyz)$/i.test(n) ? 'points' : /\.(las|laz|dxf|dwg|xml|landxml)$/i.test(n) ? k : null; };
+  for (const f of files) {
+    const kind = kindOf(f.name); if (!kind) continue;
+    const item = { file: f, kind, path: f.webkitRelativePath || f.name, size: f.size, epsg: null, note: '' };
+    try {
+      if (kind === 'prj') { const t = await f.text(); item.note = t.slice(0, 200); notes.push(t); }
+      else if (kind === 'las' || kind === 'laz') {
+        const head = await f.slice(0, 375).arrayBuffer(), off = new DataView(head).getUint32(96, true);
+        const h = lasHeader(await f.slice(0, Math.min(f.size, Math.max(375, off))).arrayBuffer());
+        item.epsg = h.epsg; item.note = `${h.count.toLocaleString()} points${h.compressed ? ', compressed' : ''}`;
+      } else if (kind === 'landxml') {
+        const t = await f.slice(0, 400000).text();
+        if (!/<LandXML/i.test(t)) continue;
+        item.epsg = +(t.match(/epsgCode="(\d+)"/) || [])[1] || null;
+        const cs = (t.match(/<CoordinateSystem[^>]*name="([^"]+)"/) || [])[1]; if (cs) { item.note = cs; notes.push(cs); }
+        item.note = [item.note, /<Surface\b/.test(t) ? 'surface' : '', /<CgPoint/.test(t) ? 'points' : ''].filter(Boolean).join(', ');
+      } else if (kind === 'points') {
+        const t = await f.slice(0, 4000).text(), rows = t.split(/\r?\n/).filter((l) => (l.match(/-?\d+\.\d+/g) || []).length >= 3);
+        if (rows.length < 3) continue; item.note = `${rows.length}+ coordinate rows`;
+      } else if (kind === 'dxf') {
+        const t = await f.slice(0, 3e6).text(); const n = (await import('./survey.js')).dxfCrsNotes(t); notes.push(...n); item.note = n[0] || '';
+      }
+    } catch { /* unreadable: still list it */ }
+    found.push(item);
+  }
+  return { found, notes };
+}

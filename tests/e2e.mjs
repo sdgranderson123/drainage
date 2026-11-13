@@ -211,7 +211,7 @@ console.log('UI: draw by mouse, edit, profile chart, relief, search');
   check(await page.evaluate(() => window.__fg.profile.pts.length) === 2, 'double-click did not add a duplicate point');
   const cb = await page.locator('#prof').boundingBox();
   await page.mouse.move(cb.x + cb.width / 2, cb.y + cb.height / 2);
-  check(/ft along · [\d.]+ ft elevation/.test(await page.textContent('#profTip')), 'chart hover readout');
+  check(/ft along · [\d.]+ ft existing/.test(await page.textContent('#profTip')), 'chart hover readout');
   // plane falls 0.2% toward 135°, so due east falls 0.2*sin(135°) = 0.141%
   const grade = await page.evaluate(() => window.__fg.profile.stats.grade * 100);
   check(near(grade, -0.1414, 0.01), `east-west profile grade ${grade.toFixed(4)}% ≈ -0.1414%`);
@@ -390,11 +390,12 @@ console.log('Design import: CAD linework, closed shapes, rock, proposed (FG) sur
   await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', 'site_plan.dxf'));
   await page.selectOption('#svRole', 'linework');
   await page.selectOption('#svCrs', 'auto');
+  await page.route('**/crs-us.json', (r) => r.fulfill({ path: path.join(ROOT, 'crs-us.json') }));
   await page.click('#svLoad');
-  await page.waitForFunction(() => document.querySelector('#status').classList.contains('err'), null, { timeout: 20000 });
-  check(/Mississippi State Plane, West Zone/.test(await page.textContent('#status')), 'no CRS in the file: error quotes the drawing note to help pick the code');
-  await page.fill('#svEpsg', '2255'); await page.click('#svLoad');
   await page.waitForFunction(() => window.__fg.cad && window.__fg.busy === 0, null, { timeout: 30000 });
+  const auto = await page.textContent('#svResult');
+  check(/EPSG:2255/.test(auto) && /Mississippi West/.test(auto), 'coordinate system auto-detected from the drawing note (EPSG:2255)', auto.slice(0, 200));
+  check(await page.locator('#svSuggest option').count() > 1, 'alternatives offered in a list');
   const cadInfo = await page.evaluate(() => ({ layers: Object.keys(window.__fg.cad.layers), dropped: window.__fg.cad.dropped }));
   check(cadInfo.layers.join() === 'C-FENCE,C-ROCK,C-UTIL-STRM-DRAINTILE' && cadInfo.dropped === 1, `linework layers ${cadInfo.layers.join(', ')}; legend skipped (${cadInfo.dropped})`);
   check(/SITE-TOPO\.dwg/.test(await page.textContent('#svResult')), 'warns about the missing xref by file name');
@@ -428,8 +429,38 @@ console.log('Design import: CAD linework, closed shapes, rock, proposed (FG) sur
   const fg = await page.evaluate(() => { const d = window.__fg.design, f = window.__fg.field; let n = 0, s = 0; for (let i = 0; i < d.z.length; i++) if (f.mask[i]) { const v = d.z[i] - f.dem.data[i]; if (Math.abs(v) > 1e-6) { n++; s += v; } } return { n, mean: s / n }; });
   check(near(fg.mean, 0.10, 0.01), `design surface raises the field by ${fg.mean.toFixed(3)} m ≈ 0.10 m (FG − existing)`);
   check(/Proposed design surface/.test(await page.textContent('#sdStats')), 'site design summary names the design surface');
+  // Profile across the field shows the proposed grade too
+  await page.evaluate(([a, b]) => window.__fg.setProfile([window.L.latLng(a, b - 0.0007), window.L.latLng(a, b + 0.0007)]), [LAT0 + 0.0002, LON0]);
+  await page.waitForFunction(() => window.__fg.profile?.stats && window.__fg.busy === 0, null, { timeout: 60000 });
+  await page.waitForFunction(() => window.__fg.profile.rows.some((r) => Number.isFinite(r.zp)), null, { timeout: 30000 }).catch(() => {});
+  const pr = await page.evaluate(() => { const r = window.__fg.profile.rows.filter((r) => Number.isFinite(r.zp)); return { n: r.length, d: r.length ? r.reduce((a, x) => a + (x.zp - x.z), 0) / r.length : NaN, key: !document.querySelector('#profKey').hidden }; });
+  check(pr.n > 10 && near(pr.d, 0.10, 0.01) && pr.key, `profile shows the proposed grade (${pr.n} points, +${pr.d.toFixed(3)} m)`);
+  // Side-by-side storm: existing vs proposed
+  await page.click('#sdStorm');
+  await page.waitForFunction(() => window.__storm.ctx?.panes.length === 2 && window.__storm.ctx.sim.t > 12.5 * 3600, null, { timeout: 400000 });
+  const cmp = await page.evaluate(() => { const P = window.__storm.ctx.panes; return { labels: P.map((p) => p.label), t: P.map((p) => p.sim.t), dz: P[1].z.reduce((a, v, i) => a + (v - P[0].z[i]), 0) / P[0].z.length, rows: document.querySelectorAll('#stStats tbody tr').length, change: document.querySelector('#stStats thead').textContent }; });
+  check(cmp.labels.join() === 'Existing,Proposed', 'Storm 3D opens side by side: existing and proposed');
+  check(Math.abs(cmp.t[0] - cmp.t[1]) < 900, `both storms in step (${(cmp.t[0] / 3600).toFixed(2)} h vs ${(cmp.t[1] / 3600).toFixed(2)} h)`);
+  check(cmp.dz > 0.01, 'proposed pane uses the design surface');
+  check(/Change/.test(cmp.change) && cmp.rows >= 6, 'comparison table with a change column');
+  await page.screenshot({ path: path.join(ROOT, 'tests', 'out-compare.png') });
+  await page.uncheck('#stCompare');
+  check(await page.evaluate(() => window.__storm.ctx.panes.length) === 1, 'compare box off: proposed only');
+  await page.keyboard.press('Escape');
   check(!page.errors.length, 'no console errors', page.errors.join(' | '));
   await page.screenshot({ path: path.join(ROOT, 'tests', 'out-design-import.png') });
+  await page.context().close();
+}
+console.log('Folder scan');
+{
+  const page = await newPage();
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFolder', path.join(ROOT, 'tests', 'fixtures'));
+  await page.waitForFunction(() => /usable files/.test(document.querySelector('#svScanResult').textContent) && window.__fg.busy === 0, null, { timeout: 30000 });
+  const sc = await page.textContent('#svScanResult');
+  check(/cloud\.las/.test(sc) && /cloud\.laz/.test(sc) && /survey_tin\.xml/.test(sc) && /survey_pnezd\.csv/.test(sc), 'folder scan lists lidar, LandXML and point files');
+  check(/EPSG:26915/.test(sc) && /EPSG:2255/.test(sc), 'scan reads EPSG codes from LAS headers and LandXML');
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
   await page.context().close();
 }
 console.log('Storm 3D: moving water and rain');

@@ -84,12 +84,17 @@
           <option value="PNEZD">P, N, E, Z, D (most common)</option><option value="PENZD">P, E, N, Z, D</option>
           <option value="NEZ">N, E, Z</option><option value="ENZ">E, N, Z</option></select></label>
         <label>Coordinate system<select id="svCrs">
-          <option value="auto">From the file</option><option value="epsg">EPSG code…</option><option value="utm">UTM (NAD83) here</option></select></label>
+          <option value="auto">Automatic</option><option value="epsg">EPSG code…</option><option value="utm">UTM (NAD83) here</option></select></label>
         <label>EPSG code<input id="svEpsg" type="number" min="1000" max="99999" placeholder="e.g. 3417" hidden></label>
+        <label>State (optional)<input id="svState" type="text" placeholder="e.g. Minnesota" autocomplete="off"></label>
+        <label>County (optional)<input id="svCounty" type="text" placeholder="e.g. Faribault" autocomplete="off"></label>
         <label>Elevation units<select id="svZ"><option value="auto">Same as horizontal</option><option value="usft">US survey feet</option><option value="ft">International feet</option><option value="m">Metres</option></select></label>
         <label title="Triangles with a side longer than this are dropped (gaps between survey areas)">Max triangle side, ft<input id="svEdge" type="number" min="10" max="2000" step="10" value="200"></label>
       </div>
-      <p class="small muted">State plane codes are listed at <a href="https://epsg.io/?q=state+plane" target="_blank" rel="noopener">epsg.io ↗</a> (e.g. NAD83(2011) Minnesota South US ft = 6505, NAD83 Iowa North US ft = 3417). Civil 3D surfaces: export LandXML (Output → Export to LandXML).</p>
+      <p class="small muted">Automatic tries every US state plane, UTM and Iowa regional system and keeps the ones that put your data inside their own area, ranked by the drawing notes, .prj files in a scanned folder, state/county and where the map is. You can pick another from the list it shows. Civil 3D surfaces: export LandXML (Output → Export to LandXML).</p>
+      <div class="row"><button type="button" class="btn" id="svScan">Scan a project folder…</button></div>
+      <input id="svFolder" type="file" webkitdirectory multiple hidden>
+      <div id="svScanResult" class="small"></div>
       <div class="row"><button type="button" class="btn primary" id="svLoad">Load files</button><button type="button" class="btn" id="svRemove" hidden>Remove all</button></div>
       <div id="svResult" class="small"></div>
       <div id="cadBox" hidden>
@@ -113,6 +118,7 @@
     <section class="card" id="profBox" hidden>
       <div class="cardhead"><h2>Elevation profile</h2><button type="button" class="link" data-clear="profile">Remove</button></div>
       <canvas id="prof" role="img" aria-label="Elevation profile chart"></canvas>
+      <p id="profKey" class="small muted legendline" hidden><span class="sw" style="background:var(--acc)"></span>Existing <span class="sw" style="background:#e07b00;margin-left:8px"></span>Proposed <span class="sw" style="background:rgba(45,104,196,.5);margin-left:8px"></span>Fill <span class="sw" style="background:rgba(200,66,58,.5);margin-left:8px"></span>Cut</p>
       <div id="profTip" class="small muted">Point at the chart to find that spot on the map.</div>
       <dl id="profStats" class="stats"></dl>
       <div class="row"><button type="button" class="btn" id="profCsv">Download CSV</button></div>
@@ -167,7 +173,7 @@
       <p id="wetResult" class="small"></p>
       <label class="switch"><input type="checkbox" id="showWet" checked> <span>Show mapped wetlands (USFWS NWI)</span></label>
       <p class="small muted">NWI maps are for screening. They are not a jurisdictional wetland delineation.</p>
-      <div class="row"><button type="button" class="btn primary" id="sdStorm">Storm 3D with changes</button></div>
+      <div class="row"><button type="button" class="btn primary" id="sdStorm">Storm 3D: existing vs proposed</button><button type="button" class="btn" id="sd3d">3D view</button></div>
     </section>
 
     <section class="card" id="shedBox" hidden>
@@ -206,7 +212,7 @@
     <button type="button" class="btn" id="stClose">Close</button>
   </div>
   <div class="stbody">
-    <canvas id="stCanvas" role="img" aria-label="3D view of terrain and water. Drag to rotate, scroll or pinch to zoom."></canvas>
+    <div id="stViews" class="stviews"></div>
     <div class="stside">
       <div class="grid2">
         <label>24-h rain, in<input id="stDepth" type="number" min="0.5" max="20" step="0.1" value="5"></label>
@@ -219,11 +225,13 @@
           <option value="0.15">0.15 – dense grass, pasture</option>
           <option value="0.40">0.40 – woods with litter</option></select></label>
       </div>
+      <label class="switch" id="stCompareRow"><input type="checkbox" id="stCompare" checked> <span>Side by side: existing vs proposed</span></label>
+      <label>Ground<select id="stLook"><option value="satellite">Satellite imagery</option><option value="elevation">Elevation colours</option></select></label>
       <label class="switch"><input type="checkbox" id="stShowMax"> <span>Show deepest water reached</span></label>
       <div class="row"><button type="button" class="btn primary" id="stPlay">Play storm</button><button type="button" class="btn" id="stReset">Reset</button></div>
       <canvas id="stChart" role="img" aria-label="Rainfall intensity bars and outflow line over 24 hours"></canvas>
-      <p class="small muted legendline"><span class="sw rain"></span>Rain intensity <span class="sw flow"></span>Outflow</p>
-      <dl id="stStats" class="stats"></dl>
+      <p class="small muted legendline" id="stChartKey"></p>
+      <table id="stStats" class="results cmp"></table>
       <p class="small muted">NRCS Type II 24-hour storm, curve-number losses, 2D overland flow with Manning friction on the lidar surface.
         Drain tile (purple) is a sink limited to the pipe's full-flow capacity. Screening visual only: no culverts or channel shapes, and coarse cells. Use HEC-RAS 2D or similar for design.</p>
     </div>
