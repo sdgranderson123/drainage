@@ -409,10 +409,10 @@ console.log('Design import: CAD linework, closed shapes, rock, proposed (FG) sur
   };
   // fence edge: x = 80 m east of the centre, y = 45 m north (outside the rock area)
   await page.evaluate(([a, b]) => window.__fg.map.setView([a, b], 17, { animate: false }), [LAT0, LON0]);
-  await clickShape(LAT0 + 45 / 111194.9, LON0 + 80 / (111194.9 * Math.cos(LAT0 * Math.PI / 180)), 'field');
+  // The fence is now used as the site outline automatically when the drawing loads.
   await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.design && window.__fg.busy === 0, null, { timeout: 60000 });
   const fa = await page.evaluate(() => window.__fg.field.area);
-  check(near(fa, 160 * 120, 160 * 120 * 0.02), `fence used as field outline (${(fa / 4046.86).toFixed(2)} ac ≈ ${(19200 / 4046.86).toFixed(2)} ac)`);
+  check(near(fa, 160 * 120, 160 * 120 * 0.02), `fence used as the site outline automatically (${(fa / 4046.86).toFixed(2)} ac ≈ ${(19200 / 4046.86).toFixed(2)} ac)`);
   // rock edge: x = 50, y = 20 (away from the tile line at y = 0)
   await clickShape(LAT0 + 20 / 111194.9, LON0 + 50 / (111194.9 * Math.cos(LAT0 * Math.PI / 180)), 'rock');
   await page.waitForFunction(() => window.__fg.design?.info.length === 1 && window.__fg.busy === 0, null, { timeout: 60000 });
