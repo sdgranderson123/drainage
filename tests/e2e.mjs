@@ -546,6 +546,27 @@ console.log('Projects: own outline, undo/redo, save, new, open, export/import');
   check(!page.errors.length && !p2.errors.length, 'no console errors', [...page.errors, ...p2.errors].join(' | '));
   await page.context().close(); await p2.context().close();
 }
+console.log('Missing xrefs: find them in a folder; spot-elevation text');
+{
+  surface = plane; const page = await newPage();
+  await page.route('**/crs-us.json', (r) => r.fulfill({ path: path.join(ROOT, 'crs-us.json') }));
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', 'site_plan.dxf'));
+  await page.selectOption('#svCrs', 'auto'); // role: Automatic (default)
+  await page.click('#svLoad');
+  await page.waitForFunction(() => window.__fg.cad && window.__fg.busy === 0, null, { timeout: 60000 });
+  const r1 = await page.textContent('#svResult');
+  check(/has no elevations/.test(r1) && /USGS lidar is used for the ground/.test(r1), 'drawing without elevations: plain message, lidar used for the ground');
+  check(/SITE-TOPO\.dwg/.test(r1) && await page.locator('#svXrefFolder').count() === 1, 'missing xref named with a "Find them in a folder" button');
+  await page.setInputFiles('#svXrefFolder', path.join(ROOT, 'tests', 'fixtures', 'project'));
+  await page.waitForFunction(() => window.__fg.survey && window.__fg.busy === 0, null, { timeout: 120000 });
+  const sv = await page.evaluate(() => ({ n: window.__fg.survey.sv.xyz.length / 3, name: window.__fg.survey.name, note: window.__fg.survey.sv.note, med: window.__fg.survey.cmp?.median }));
+  check(sv.n === 21 * 17 && /SITE-TOPO\.dxf/.test(sv.name), `xref found in a subfolder and loaded (${sv.n} spot elevations from text; sheet number ignored)`);
+  check(near(sv.med, 0.10, 0.02), `spot elevations line up with lidar + 0.10 m (median ${sv.med?.toFixed(3)} m)`);
+  check(!/not loaded/.test(await page.textContent('#svResult')), 'no missing-xref message once found');
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
 console.log('Folder scan');
 {
   const page = await newPage();
