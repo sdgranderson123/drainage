@@ -92,11 +92,17 @@
         <label title="Triangles with a side longer than this are dropped (gaps between survey areas)">Max triangle side, ft<input id="svEdge" type="number" min="10" max="2000" step="10" value="200"></label>
       </div>
       <p class="small muted">Automatic tries every US state plane, UTM and Iowa regional system and keeps the ones that put your data inside their own area, ranked by the drawing notes, .prj files in a scanned folder, state/county and where the map is. You can pick another from the list it shows. Civil 3D surfaces: export LandXML (Output → Export to LandXML).</p>
-      <div class="row"><button type="button" class="btn" id="svScan">Scan a project folder…</button></div>
-      <input id="svFolder" type="file" webkitdirectory multiple hidden>
+      <div class="row">
+        <label class="btn filebtn" id="svScanLbl">Scan a project folder…<input id="svFolder" type="file" webkitdirectory multiple class="sr"></label>
+      </div>
+      <p class="small muted" id="svScanHelp">Chrome/Edge will ask “Upload N files to this site?”. Choose <b>Upload</b>: the files are only read in this browser tab and are not sent anywhere. Large network folders can take a minute to list.</p>
       <div id="svScanResult" class="small"></div>
       <div class="row"><button type="button" class="btn primary" id="svLoad">Load files</button><button type="button" class="btn" id="svRemove" hidden>Remove all</button></div>
       <div id="svResult" class="small"></div>
+      <div id="svNext" class="row" hidden>
+        <button type="button" class="btn primary" id="sv3dStorm">Storm 3D: existing vs proposed</button>
+        <button type="button" class="btn" id="sv3d">3D view</button>
+      </div>
       <div id="cadBox" hidden>
         <h3 class="sub">Drawing layers</h3>
         <p class="small muted">Click a closed shape on the map (fence, pad, rock edge) to use it.</p>

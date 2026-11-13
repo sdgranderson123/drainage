@@ -109,9 +109,38 @@ $('svFile').onchange = () => {
 $('svCrs').onchange = () => { $('svEpsg').hidden = $('svCrs').value !== 'epsg'; };
 try { const e = localStorage.getItem('fg:lastEpsg'); if (e) $('svEpsg').value = e; } catch { /* ignore */ }
 $('svLoad').onclick = () => importSurvey();
-$('svScan').onclick = () => $('svFolder').click();
+// 3D from the Survey & design card: use the field outline if there is one, otherwise the drawing's site boundary
+// (fence / boundary / largest closed outline) or the extent of the design surface or survey.
+async function ensureField() {
+  if (field?.dem && design) return true;
+  if (!field) {
+    let best = null;
+    if (cad) for (const [name, l] of Object.entries(cad.layers)) l.group.eachLayer((sh) => {
+      if (!(sh instanceof L.Polygon)) return;
+      const ring = sh.getLatLngs()[0]; if (ring.length < 3) return;
+      const a = areaOf(ring) * (/FENCE|BOUND|LIMIT|SITE|PROP/i.test(name) ? 4 : 1);
+      if (!best || a > best.a) best = { a, pts: ring.slice() };
+    });
+    const ext = (designSurf || survey)?.extent;
+    const pts = best?.pts || (ext && [L.latLng(ext.n, ext.w), L.latLng(ext.n, ext.e), L.latLng(ext.s, ext.e), L.latLng(ext.s, ext.w)]);
+    if (!pts) { hint('Outline the site first (Field cut & fill), or load a drawing or design surface.'); return false; }
+    setField(pts);
+  }
+  for (let k = 0; k < 600 && !(field?.dem && design && busy === 0); k++) await new Promise((r) => setTimeout(r, 200));
+  return !!(field?.dem && design);
+}
+$('sv3dStorm').onclick = async () => { if (await ensureField()) openDesignStorm(); };
+$('sv3d').onclick = async () => { if (await ensureField()) openDesignStorm({ autoplay: false }); };
+// Folder picking needs webkitdirectory (desktop Chrome/Edge/Firefox/Safari). Elsewhere fall back to picking files.
+if (!('webkitdirectory' in document.createElement('input')) || /iPhone|iPad|iPod/.test(navigator.userAgent)) {
+  $('svFolder').removeAttribute('webkitdirectory');
+  $('svScanLbl').firstChild.textContent = 'Scan files… ';
+  $('svScanHelp').textContent = 'This device can’t pick a whole folder. Select the files instead (hold to select several).';
+}
 $('svFolder').onchange = async () => {
-  const files = [...$('svFolder').files]; if (!files.length) return;
+  const files = [...$('svFolder').files];
+  if (!files.length) { $('svScanResult').innerHTML = '<div class="warn">The browser returned no files. If it asked to “Upload” the folder, choose Upload (nothing is sent anywhere).</div>'; return; }
+  $('svScanResult').innerHTML = `<div>Reading ${files.length.toLocaleString()} files…</div>`;
   await withBusy(async () => {
     status(`Searching ${files.length.toLocaleString()} files…`);
     const { found, notes } = await scanFolder(files);
@@ -129,7 +158,8 @@ $('svFolder').onchange = async () => {
     status('');
   });
 };
-$('svRemove').onclick = () => { for (const e of [survey, designSurf]) (e?.layers || []).forEach((l) => map.removeLayer(l)); survey = null; designSurf = null; clearCad(); $('svResult').innerHTML = ''; $('svRemove').hidden = true; reloadAllSurfaces(); };
+$('svRemove').onclick = () => {
+  $('svNext').hidden = true; for (const e of [survey, designSurf]) (e?.layers || []).forEach((l) => map.removeLayer(l)); survey = null; designSurf = null; clearCad(); $('svResult').innerHTML = ''; $('svRemove').hidden = true; reloadAllSurfaces(); };
 let designSurf = null, cad = null;
 let folderNotes = [];
 async function importSurvey(filesOverride) {
@@ -194,6 +224,7 @@ async function importSurvey(filesOverride) {
     if (guess) msgs.unshift(suggestHTML(guess, code));
     else if (how) msgs.unshift(`<div>Coordinate system EPSG:${code} (${how}).</div>`);
     $('svResult').innerHTML = msgs.join(''); $('svRemove').hidden = false; status('');
+    $('svNext').hidden = !(designSurf || cad || survey);
     const sel = $('svSuggest'); if (sel) sel.onchange = () => { $('svCrs').value = 'epsg'; $('svEpsg').hidden = false; $('svEpsg').value = sel.value; importSurvey(files); };
     if (cad?.bounds && !withZ.length) map.fitBounds(cad.bounds, { padding: [60, 60], maxZoom: 19, animate: false });
     reloadAllSurfaces();

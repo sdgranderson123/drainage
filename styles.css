@@ -226,3 +226,6 @@ table.cmp td.good { color: var(--acc); font-weight: 600; } table.cmp td.bad { co
   canvas#prof { height: 150px; }
   .legend { box-shadow: none; border: 1px solid #999; }
 }
+
+.filebtn { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.filebtn:focus-within { outline: 3px solid var(--focus); outline-offset: 1px; }

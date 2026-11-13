@@ -451,6 +451,23 @@ console.log('Design import: CAD linework, closed shapes, rock, proposed (FG) sur
   await page.screenshot({ path: path.join(ROOT, 'tests', 'out-design-import.png') });
   await page.context().close();
 }
+console.log('3D straight from Survey & design files');
+{
+  surface = plane; const page = await newPage();
+  await page.route('**/crs-us.json', (r) => r.fulfill({ path: path.join(ROOT, 'crs-us.json') }));
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFile', [path.join(ROOT, 'tests', 'fixtures', 'site_plan.dxf'), path.join(ROOT, 'tests', 'fixtures', 'survey_tin.xml')]);
+  await page.selectOption('#svRole', 'design'); await page.selectOption('#svCrs', 'auto');
+  await page.click('#svLoad');
+  await page.waitForFunction(() => window.__fg.designSurf && window.__fg.cad && window.__fg.busy === 0, null, { timeout: 120000 });
+  check(await page.isVisible('#sv3dStorm') && await page.isVisible('#sv3d'), '3D buttons appear in the Survey & design card');
+  await page.click('#sv3dStorm');
+  await page.waitForFunction(() => window.__storm.ctx?.panes.length === 2, null, { timeout: 180000 });
+  const fa = await page.evaluate(() => window.__fg.field.area);
+  check(near(fa, 160 * 120, 160 * 120 * 0.02), `no field drawn: the drawing's fence was used (${(fa / 4046.86).toFixed(2)} ac)`);
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
 console.log('Folder scan');
 {
   const page = await newPage();
