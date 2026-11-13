@@ -1,268 +1,340 @@
-// 3D storm viewer: terrain + live water surface (three.js), hyetograph/outflow chart, mass balance.
+// 3D terrain and storm viewer (three.js). One pane, or two side by side (existing vs proposed) with locked
+// cameras and a shared storm clock. Terrain shows satellite imagery or elevation colours; outlines, CAD lines
+// and design edits are drawn on the ground; tracer particles show where surface water runs.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { StormSim, coarsen } from './storm.js';
 import { hillshade, rampColor, quantile, M_TO_FT } from './earthwork.js';
 
 const $ = (id) => document.getElementById(id);
-const CFS = 35.3147;
-let ctx = null; // current viewer state
+const CFS = 35.3147, ACFT = 1 / 1233.48;
+const IMAGERY = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export';
+let V = null; // viewer state
 
-// dem: { data, W, H, dx, dy }; opts: { title, depthIn, CN, mask? (Uint8Array, same grid) }
+// dem: { data, W, H, dx, dy, w, s, e, n }. opts: { title, depthIn, CN, mask, sinks, proposed (Float32Array on the
+// same grid), outline [[lat, lon]], lines [{ pts: [[lat, lon]], color }], autoplay, compare, maxCells }
 export function openStorm(dem, opts = {}) {
   closeStorm();
-  const c = coarsen(dem.data, dem.W, dem.H, dem.dx, dem.dy, opts.maxCells || 128);
-  // Optional rain mask (the property or drainage area): rain falls only there, water flows anywhere on the grid.
-  c.drain = null; c.rain = null;
+  const base = coarsen(dem.data, dem.W, dem.H, dem.dx, dem.dy, opts.maxCells || 128);
+  const prop = opts.proposed ? coarsen(opts.proposed, dem.W, dem.H, dem.dx, dem.dy, opts.maxCells || 128) : null;
+  const f = base.f, W = base.W, H = base.H;
+  let rain = null;
   if (opts.mask) {
-    const f = c.f; c.rain = new Uint8Array(c.W * c.H);
-    for (let y = 0; y < c.H; y++) for (let x = 0; x < c.W; x++) {
+    rain = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       let cnt = 0; for (let yy = 0; yy < f; yy++) for (let xx = 0; xx < f; xx++) cnt += opts.mask[(y * f + yy) * dem.W + x * f + xx];
-      if (cnt * 2 >= f * f) c.rain[y * c.W + x] = 1;
+      if (cnt * 2 >= f * f) rain[y * W + x] = 1;
     }
   }
-  // Tile lines: map fine-grid cells onto the coarse simulation grid.
-  c.sinks = (opts.sinks || []).map((k) => {
+  const sinks = (opts.sinks || []).map((k) => {
     const set = new Set();
-    for (const i of k.cells) { const x = Math.floor((i % dem.W) / c.f), y = Math.floor(((i / dem.W) | 0) / c.f); if (x < c.W && y < c.H) set.add(y * c.W + x); }
+    for (const i of k.cells) { const x = Math.floor((i % dem.W) / f), y = Math.floor(((i / dem.W) | 0) / f); if (x < W && y < H) set.add(y * W + x); }
     return { cells: [...set], capM3s: k.capM3s };
   });
-  const root = $('storm');
-  root.hidden = false; document.body.classList.add('modal-open');
+  // Common height datum so both panes line up.
+  let lo = Infinity; for (const g of [base, prop]) if (g) for (const v of g.z) if (v === v && v < lo) lo = v;
+  // The grid's lat/lon extent after coarsening (it may lose a few edge cells).
+  const ext = { w: dem.w, n: dem.n, e: dem.w + ((dem.e - dem.w) * W * f) / dem.W, s: dem.n - ((dem.n - dem.s) * H * f) / dem.H };
+  $('storm').hidden = false; document.body.classList.add('modal-open');
   $('stTitle').textContent = opts.title || 'Storm simulation';
   $('stDepth').value = opts.depthIn ?? 5; $('stCN').value = opts.CN ?? 78;
-  const renderer = new THREE.WebGLRenderer({ canvas: $('stCanvas'), antialias: true, preserveDrawingBuffer: true });
-  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
-  const scene = new THREE.Scene(); scene.background = new THREE.Color(0x9fb4c4);
-  scene.fog = new THREE.Fog(0x9fb4c4, 1, 1e9);
-  const camera = new THREE.PerspectiveCamera(45, 1, 1, 1e6);
-  const controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x5a6b55, 0.9));
-  const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(-1, 2, 1.2); scene.add(sun);
-
-  const { W, H } = c, sx = c.dx, sy = c.dy;
-  let lo = Infinity; for (const v of c.z) if (Number.isFinite(v) && v < lo) lo = v;
-  const vals = []; for (const v of c.z) if (Number.isFinite(v)) vals.push(v);
-  const zlo = quantile(vals, 0.02), zhi = quantile(vals, 0.98);
-  const terrainGeo = grid(W, H, sx, sy), waterGeo = grid(W, H, sx, sy);
-  const tColor = new Float32Array(W * H * 3), hs = hillshade(c.z, W, H, sx, sy, { exaggeration: 3 });
-  for (let i = 0; i < W * H; i++) {
-    const v = c.z[i], [r, g, b] = Number.isFinite(v) ? rampColor((v - zlo) / Math.max(0.3, zhi - zlo)) : [70, 80, 90];
-    const s = (Number.isFinite(hs[i]) ? 0.55 + 0.6 * hs[i] : 0.6) * (c.rain && !c.rain[i] ? 0.7 : 1);
-    tColor[i * 3] = Math.min(1, (r / 255) * s); tColor[i * 3 + 1] = Math.min(1, (g / 255) * s); tColor[i * 3 + 2] = Math.min(1, (b / 255) * s);
-  }
-  // Yellow outline on the edge of the rain area (the property / drainage area).
-  if (c.rain) for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const i = y * W + x; if (!c.rain[i]) continue;
-    const edge = x === 0 || y === 0 || x === W - 1 || y === H - 1 || !c.rain[i - 1] || !c.rain[i + 1] || !c.rain[i - W] || !c.rain[i + W];
-    if (edge) { tColor[i * 3] = 1; tColor[i * 3 + 1] = 0.83; tColor[i * 3 + 2] = 0; }
-  }
-  for (const k of c.sinks) for (const i of k.cells) { tColor[i * 3] = 0.55; tColor[i * 3 + 1] = 0.2; tColor[i * 3 + 2] = 0.85; } // tile lines
-  terrainGeo.setAttribute('color', new THREE.BufferAttribute(tColor, 3));
-  const terrain = new THREE.Mesh(terrainGeo, new THREE.MeshLambertMaterial({ vertexColors: true }));
-  const wColor = new Float32Array(W * H * 4);
-  waterGeo.setAttribute('color', new THREE.BufferAttribute(wColor, 4));
-  const water = new THREE.Mesh(waterGeo, new THREE.MeshPhongMaterial({ vertexColors: true, transparent: true, shininess: 90, specular: 0x88aacc, depthWrite: false }));
-  scene.add(terrain, water);
-  // Moving water: tracer particles carried by the simulated flow, and falling rain.
-  const NP = 6000, pPos = new Float32Array(NP * 3), pGeo = new THREE.BufferGeometry();
-  pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
-  const tracers = new THREE.Points(pGeo, new THREE.PointsMaterial({ color: 0xeaf6ff, size: 2.4, sizeAttenuation: false, transparent: true, opacity: 0.9, depthWrite: false }));
-  const NR = 2500, rPos = new Float32Array(NR * 3), rGeo = new THREE.BufferGeometry();
-  rGeo.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
-  const rain = new THREE.Points(rGeo, new THREE.PointsMaterial({ color: 0xc8d4e0, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.7, depthWrite: false }));
-  tracers.frustumCulled = rain.frustumCulled = false;
-  scene.add(tracers, rain);
-
-  const sim = new StormSim(c.z, W, H, Math.sqrt(sx * sy), { depthIn: +$('stDepth').value, CN: +$('stCN').value, drain: c.drain, rainMask: c.rain, sinks: c.sinks, manning: +$('stN').value });
-  ctx = { renderer, scene, camera, controls, terrain, water, c, sim, lo, playing: false, raf: 0, sx, sy, cellArea: sx * sy, opts, dem,
-    tracers, rain, tp: { x: new Float32Array(NP), y: new Float32Array(NP), age: new Float32Array(NP).fill(1e9), n: NP },
-    rp: { x: new Float32Array(NR), y: new Float32Array(NR), z: new Float32Array(NR), n: NR }, lastFrame: performance.now() };
-  setExaggeration();
-  frameCamera();
-  resize(); window.addEventListener('resize', resize);
-  updateWater(); drawChart(); updateStats();
+  $('stCompareRow').hidden = !prop;
+  $('stCompare').checked = !!prop && opts.compare !== false;
+  V = { dem, opts, W, H, sx: base.dx, sy: base.dy, lo, rain, sinks, ext, base, prop, panes: [], playing: false, raf: 0, lastFrame: performance.now(), chartT: 0, imagery: null };
+  buildPanes();
+  window.addEventListener('resize', resize);
+  loadImagery();
   loop();
-  if (opts.autoplay !== false) { ctx.playing = true; $('stPlay').textContent = 'Pause'; }
-  return ctx;
+  if (opts.autoplay !== false) setPlaying(true); else setPlaying(false);
+  return V;
 }
 
-function grid(W, H, sx, sy) {
+// (Re)create panes for the current compare setting.
+function buildPanes() {
+  const cam = V.panes[0] ? { p: V.panes[0].camera.position.clone(), t: V.panes[0].controls.target.clone() } : null;
+  V.panes.forEach(disposePane); V.panes = [];
+  const box = $('stViews'); box.innerHTML = '';
+  const surfaces = V.prop && $('stCompare').checked ? [['Existing', V.base.z], ['Proposed', V.prop.z]] : [[V.prop ? 'Proposed' : '', (V.prop || V.base).z]];
+  box.classList.toggle('two', surfaces.length === 2);
+  for (const [label, z] of surfaces) V.panes.push(makePane(label, z, box));
+  frameCamera(cam); resize(); applyLook(); resetSims();
+}
+function makePane(label, z, box) {
+  const wrap = document.createElement('div'); wrap.className = 'stpane';
+  const canvas = document.createElement('canvas'); canvas.setAttribute('role', 'img');
+  canvas.setAttribute('aria-label', `3D view of ${label || 'the site'}: drag to rotate, scroll or pinch to zoom`);
+  wrap.appendChild(canvas);
+  if (label) { const t = document.createElement('span'); t.className = 'stlabel'; t.textContent = label; wrap.appendChild(t); }
+  box.appendChild(wrap);
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  const scene = new THREE.Scene(); scene.background = new THREE.Color(0x9fb4c4); scene.fog = new THREE.Fog(0x9fb4c4, 1, 1e9);
+  const camera = new THREE.PerspectiveCamera(45, 1, 1, 1e6);
+  const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x5a6b55, 0.95));
+  const sun = new THREE.DirectionalLight(0xffffff, 1.3); sun.position.set(-1, 2, 1.2); scene.add(sun);
+  const { W, H } = V;
+  const terrain = new THREE.Mesh(grid(W, H, V.sx, V.sy, true), new THREE.MeshLambertMaterial({ vertexColors: true }));
+  const waterGeo = grid(W, H, V.sx, V.sy, false); waterGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(W * H * 4), 4));
+  const water = new THREE.Mesh(waterGeo, new THREE.MeshPhongMaterial({ vertexColors: true, transparent: true, shininess: 90, specular: 0x88aacc, depthWrite: false }));
+  const NP = 6000, NR = 2000;
+  const tracers = points(NP, 0xeaf6ff, 2.4, 0.9), rain = points(NR, 0xc8d4e0, 1.6, 0.7);
+  const trails = new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(NP * 6), 3)),
+    new THREE.LineBasicMaterial({ color: 0xbfe3ff, transparent: true, opacity: 0.55, depthWrite: false }));
+  trails.frustumCulled = false;
+  const lines = new THREE.Group();
+  scene.add(terrain, water, trails, tracers, rain, lines);
+  const pane = { label, z, wrap, canvas, renderer, scene, camera, controls, terrain, water, tracers, trails, rain, lines,
+    tp: { x: new Float32Array(NP), y: new Float32Array(NP), px: new Float32Array(NP), py: new Float32Array(NP), age: new Float32Array(NP).fill(1e9), n: NP },
+    rp: { x: new Float32Array(NR), y: new Float32Array(NR), z: new Float32Array(NR), n: NR }, sim: null };
+  // Lock cameras: whichever pane the user drags drives the others.
+  controls.addEventListener('change', () => { if (V.syncing) return; V.syncing = true; for (const p of V.panes) if (p !== pane) { p.camera.position.copy(camera.position); p.controls.target.copy(controls.target); p.controls.update(); } V.syncing = false; });
+  return pane;
+}
+function points(n, color, size, opacity) {
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3).fill(-1e6), 3));
+  const p = new THREE.Points(g, new THREE.PointsMaterial({ color, size, sizeAttenuation: false, transparent: true, opacity, depthWrite: false }));
+  p.frustumCulled = false; return p;
+}
+function grid(W, H, sx, sy, uv) {
   const g = new THREE.BufferGeometry(), pos = new Float32Array(W * H * 3), idx = [];
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = (y * W + x) * 3; pos[i] = x * sx; pos[i + 2] = y * sy; }
   for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) { const a = y * W + x; idx.push(a, a + W, a + 1, a + 1, a + W, a + W + 1); }
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setIndex(idx);
+  if (uv) { const t = new Float32Array(W * H * 2); for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { t[(y * W + x) * 2] = (x + 0.5) / W; t[(y * W + x) * 2 + 1] = 1 - (y + 0.5) / H; } g.setAttribute('uv', new THREE.BufferAttribute(t, 2)); }
   return g;
 }
-function exag() { return +$('stExag').value; }
-function setExaggeration() {
-  const { c, terrain, lo } = ctx, p = terrain.geometry.attributes.position, e = exag();
-  for (let i = 0; i < c.W * c.H; i++) p.array[i * 3 + 1] = Number.isFinite(c.z[i]) ? (c.z[i] - lo) * e : 0;
-  p.needsUpdate = true; terrain.geometry.computeVertexNormals();
+function disposePane(p) { p.terrain.geometry.dispose(); p.water.geometry.dispose(); p.tracers.geometry.dispose(); p.rain.geometry.dispose(); p.trails.geometry.dispose(); p.renderer.dispose(); }
+
+// ---- look: satellite imagery or elevation colours; tint where the design changes the ground ----
+function loadImagery() {
+  const { ext } = V, aspect = ((ext.e - ext.w) * Math.cos(((ext.n + ext.s) / 2) * Math.PI / 180)) / (ext.n - ext.s);
+  const w = aspect >= 1 ? 2048 : Math.round(2048 * aspect), h = aspect >= 1 ? Math.round(2048 / aspect) : 2048;
+  const url = `${IMAGERY}?bbox=${ext.w},${ext.s},${ext.e},${ext.n}&bboxSR=4326&imageSR=4326&size=${w},${h}&format=jpg&f=image`;
+  new THREE.TextureLoader().setCrossOrigin('anonymous').load(url, (tex) => { if (!V) return; tex.colorSpace = THREE.SRGBColorSpace; V.imagery = tex; applyLook(); },
+    undefined, () => { if (V) { V.imageryFailed = true; applyLook(); } });
+}
+function applyLook() {
+  const sat = $('stLook').value === 'satellite' && V.imagery;
+  const { W, H, lo } = V, e = exag();
+  for (const p of V.panes) {
+    const z = p.z, pos = p.terrain.geometry.attributes.position;
+    for (let i = 0; i < W * H; i++) pos.array[i * 3 + 1] = z[i] === z[i] ? (z[i] - lo) * e : 0;
+    pos.needsUpdate = true; p.terrain.geometry.computeVertexNormals();
+    const col = new Float32Array(W * H * 3), changed = p.label === 'Proposed' || (!p.label && V.prop);
+    if (sat) col.fill(1);
+    else {
+      const vals = []; for (const v of z) if (v === v) vals.push(v);
+      const zlo = quantile(vals, 0.02), zhi = quantile(vals, 0.98), hs = hillshade(z, W, H, V.sx, V.sy, { exaggeration: 3 });
+      for (let i = 0; i < W * H; i++) {
+        const [r, g, b] = z[i] === z[i] ? rampColor((z[i] - zlo) / Math.max(0.3, zhi - zlo)) : [70, 80, 90], s = hs[i] === hs[i] ? 0.55 + 0.6 * hs[i] : 0.6;
+        col[i * 3] = Math.min(1, (r / 255) * s); col[i * 3 + 1] = Math.min(1, (g / 255) * s); col[i * 3 + 2] = Math.min(1, (b / 255) * s);
+      }
+    }
+    // Proposed: tint ground the design raises (warm) or lowers (cool) so the regrading reads on imagery.
+    if (changed && V.prop) for (let i = 0; i < W * H; i++) {
+      const d = V.prop.z[i] - V.base.z[i]; if (!(Math.abs(d) > 0.03)) continue;
+      const t = Math.min(1, Math.abs(d) / 0.6);
+      if (d > 0) { col[i * 3] *= 1; col[i * 3 + 1] *= 1 - 0.18 * t; col[i * 3 + 2] *= 1 - 0.4 * t; }
+      else { col[i * 3] *= 1 - 0.35 * t; col[i * 3 + 1] *= 1 - 0.15 * t; col[i * 3 + 2] *= 1; }
+    }
+    for (const k of V.sinks) for (const i of k.cells) { col[i * 3] = 0.55; col[i * 3 + 1] = 0.2; col[i * 3 + 2] = 0.85; }
+    p.terrain.geometry.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    p.terrain.material.map = sat ? V.imagery : null; p.terrain.material.needsUpdate = true;
+    drawLines(p);
+  }
   updateWater();
 }
-function frameCamera() {
-  const { c, camera, controls, sx, sy } = ctx, w = c.W * sx, h = c.H * sy, r = Math.hypot(w, h);
-  controls.target.set(w / 2, 0, h / 2);
-  // Nearly straight down with a slight tilt so relief still reads; drag to orbit.
-  camera.position.set(w * 0.5, r * 1.05, h * 0.5 + r * 0.38);
-  camera.near = r / 1000; camera.far = r * 20; camera.updateProjectionMatrix();
-  ctx.scene.fog.near = r * 1.5; ctx.scene.fog.far = r * 6;
+// Outline, CAD lines and edit shapes draped on the ground (lat/lon → grid → surface height).
+function drawLines(p) {
+  p.lines.clear();
+  const { ext, W, H, lo } = V, e = exag(), z = p.z;
+  const toXYZ = ([la, lo2]) => {
+    const gx = ((lo2 - ext.w) / (ext.e - ext.w)) * W - 0.5, gy = ((ext.n - la) / (ext.n - ext.s)) * H - 0.5;
+    const i = Math.min(H - 1, Math.max(0, Math.round(gy))) * W + Math.min(W - 1, Math.max(0, Math.round(gx)));
+    return new THREE.Vector3(gx * V.sx, ((z[i] === z[i] ? z[i] : lo) - lo) * e + 0.25, gy * V.sy);
+  };
+  const add = (pts, color, closed) => {
+    const v = []; for (let k = 1; k < pts.length; k++) {
+      // densify so the line follows the ground
+      const a = pts[k - 1], b = pts[k], n = 8; for (let s = 0; s < n; s++) v.push(toXYZ([a[0] + ((b[0] - a[0]) * s) / n, a[1] + ((b[1] - a[1]) * s) / n]));
+    }
+    v.push(toXYZ(pts[pts.length - 1])); if (closed) v.push(toXYZ(pts[0]));
+    p.lines.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(v), new THREE.LineBasicMaterial({ color })));
+  };
+  if (V.opts.outline) add(V.opts.outline, 0xffd400, true);
+  for (const l of V.opts.lines || []) if (l.pts.length >= 2) add(l.pts, new THREE.Color(l.color), l.closed);
+}
+
+function exag() { return +$('stExag').value; }
+function frameCamera(cam) {
+  const w = V.W * V.sx, h = V.H * V.sy, r = Math.hypot(w, h);
+  for (const p of V.panes) {
+    if (cam) { p.camera.position.copy(cam.p); p.controls.target.copy(cam.t); }
+    else { p.controls.target.set(w / 2, 0, h / 2); p.camera.position.set(w * 0.5, r * 1.05, h * 0.5 + r * 0.38); }
+    p.camera.near = r / 1000; p.camera.far = r * 20; p.camera.updateProjectionMatrix();
+    p.scene.fog.near = r * 1.5; p.scene.fog.far = r * 6;
+  }
 }
 function resize() {
-  if (!ctx) return;
-  const cv = $('stCanvas'), w = cv.clientWidth, h = cv.clientHeight;
-  ctx.renderer.setSize(w, h, false); ctx.camera.aspect = w / Math.max(1, h); ctx.camera.updateProjectionMatrix();
+  if (!V) return;
+  for (const p of V.panes) { const w = p.canvas.clientWidth, h = p.canvas.clientHeight; p.renderer.setSize(w, h, false); p.camera.aspect = w / Math.max(1, h); p.camera.updateProjectionMatrix(); }
   drawChart();
 }
-const MIN_SHOW = 0.0008; // m: show even thin sheet flow
+
+// ---- simulation ----
+function resetSims() {
+  const opt = { depthIn: +$('stDepth').value || 5, CN: Math.min(98, Math.max(30, +$('stCN').value || 78)), rainMask: V.rain, sinks: V.sinks, manning: +$('stN').value || 0.06 };
+  for (const p of V.panes) {
+    // Drain tile only belongs to the proposed design.
+    p.sim = new StormSim(p.z, V.W, V.H, Math.sqrt(V.sx * V.sy), { ...opt, sinks: p.label === 'Existing' ? [] : V.sinks });
+    p.tp.age.fill(1e9);
+  }
+  updateWater(); updateStats(); drawChart();
+}
+const MIN_SHOW = 0.0008;
 function updateWater() {
-  const { c, sim, water, lo } = ctx, p = water.geometry.attributes.position, col = water.geometry.attributes.color, e = exag();
-  const showMax = $('stShowMax').checked, h = showMax ? sim.maxH : sim.h, W = c.W, H = c.H, b = sim.b;
-  // Display level per vertex: highest wet water surface among the 3x3 neighbours, so one-cell channels
-  // render as continuous ribbons instead of isolated triangles. Physics is unaffected.
-  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-    const i = y * W + x, bed = Number.isFinite(c.z[i]) ? c.z[i] : lo;
-    let lvl = -Infinity;
-    for (let yy = Math.max(0, y - 1); yy <= Math.min(H - 1, y + 1); yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(W - 1, x + 1); xx++) {
-      const j = yy * W + xx; if (h[j] > MIN_SHOW) { const s2 = b[j] + h[j]; if (s2 > lvl) lvl = s2; }
+  if (!V) return;
+  const { W, H, lo } = V, e = exag(), showMax = $('stShowMax').checked;
+  for (const p of V.panes) {
+    if (!p.sim) continue;
+    const pos = p.water.geometry.attributes.position, col = p.water.geometry.attributes.color, h = showMax ? p.sim.maxH : p.sim.h, b = p.sim.b, z = p.z;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, bed = z[i] === z[i] ? z[i] : lo;
+      let lvl = -Infinity;
+      for (let yy = Math.max(0, y - 1); yy <= Math.min(H - 1, y + 1); yy++) for (let xx = Math.max(0, x - 1); xx <= Math.min(W - 1, x + 1); xx++) {
+        const j = yy * W + xx; if (h[j] > MIN_SHOW) { const s2 = b[j] + h[j]; if (s2 > lvl) lvl = s2; }
+      }
+      const d = Math.max(0, lvl - bed), wet = d > MIN_SHOW, t = Math.min(1, Math.max(0, Math.log10(Math.max(d, 1e-3) / 1e-3) / Math.log10(500)));
+      pos.array[i * 3] = x * V.sx; pos.array[i * 3 + 2] = y * V.sy;
+      pos.array[i * 3 + 1] = wet ? (lvl - lo) * e + 0.02 : (bed - lo) * e - 0.05;
+      col.array[i * 4] = 0.35 - 0.3 * t; col.array[i * 4 + 1] = 0.65 - 0.4 * t; col.array[i * 4 + 2] = 1.0 - 0.3 * t; col.array[i * 4 + 3] = wet ? 0.3 + 0.65 * t : 0;
     }
-    const d = Math.max(0, lvl - bed), wet = d > MIN_SHOW;
-    p.array[i * 3 + 1] = wet ? (lvl - lo) * e + 0.02 : (bed - lo) * e - 0.05;
-    // Depth on a log scale (1 mm → 0, 0.5 m → 1) so sheet flow shows faintly and channels/ponds strongly.
-    const t = Math.min(1, Math.max(0, Math.log10(Math.max(d, 1e-3) / 1e-3) / Math.log10(500)));
-    col.array[i * 4] = 0.35 - 0.3 * t; col.array[i * 4 + 1] = 0.65 - 0.4 * t; col.array[i * 4 + 2] = 1.0 - 0.3 * t;
-    col.array[i * 4 + 3] = wet ? 0.3 + 0.65 * t : 0;
+    pos.needsUpdate = true; col.needsUpdate = true; p.water.geometry.computeVertexNormals();
   }
-  p.needsUpdate = true; col.needsUpdate = true; water.geometry.computeVertexNormals();
 }
-function updateStats() {
-  const { sim, cellArea, c } = ctx, b = sim.balance(), hr = sim.t / 3600;
-  let wet = 0, deep = 0, maxd = 0;
-  for (let i = 0; i < sim.h.length; i++) { if (sim.h[i] > 0.01) wet++; if (sim.h[i] > 0.15) deep++; if (sim.maxH[i] > maxd) maxd = sim.maxH[i]; }
-  const area = sim.active * cellArea, toAcFt = 1 / 1233.48, rainIn = sim.cumRainM(sim.t) / 0.0254;
-  const peak = sim.history.reduce((m, r) => Math.max(m, r.q), 0);
-  $('stClock').textContent = `${String(Math.floor(hr)).padStart(2, '0')}:${String(Math.floor((hr % 1) * 60)).padStart(2, '0')}`;
-  $('stStats').innerHTML = `
-    <dt>Rain so far</dt><dd>${rainIn.toFixed(2)} in</dd>
-    <dt>Runoff so far</dt><dd>${(b.excess / area / 0.0254).toFixed(2)} in · ${(b.excess * toAcFt).toFixed(1)} ac-ft</dd>
-    <dt>${c.rain ? 'Water on the property' : 'Ponded now'}</dt><dd>${((c.rain ? sim.storedInMask() : b.stored) * toAcFt).toFixed(1)} ac-ft</dd>
-    <dt>${c.rain ? 'Ran off the property' : 'Left the area'}</dt><dd>${((c.rain ? b.excess - sim.storedInMask() - b.tile : b.out) * toAcFt).toFixed(1)} ac-ft</dd>
-    ${c.sinks.length ? `<dt>Taken by drain tile</dt><dd>${(b.tile * toAcFt).toFixed(1)} ac-ft</dd>` : ''}
-    <dt>Peak outflow</dt><dd>${Math.round(peak * CFS).toLocaleString('en-US')} cfs</dd>
-    <dt>Wet / over 6 in deep</dt><dd>${(wet * cellArea / 4046.86).toFixed(1)} / ${(deep * cellArea / 4046.86).toFixed(1)} ac</dd>
-    <dt>Deepest water</dt><dd>${(maxd * M_TO_FT).toFixed(2)} ft</dd>
-    <dt>Mass balance error</dt><dd>${b.excess > 0 ? (100 * Math.abs(b.error) / b.excess).toFixed(2) : '0.00'}%</dd>`;
-}
-function drawChart() {
-  if (!ctx) return;
-  const cv = $('stChart'), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
-  if (!W) return;
-  cv.width = W * dpr; cv.height = H * dpr;
-  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
-  const css = getComputedStyle(document.documentElement), muted = css.getPropertyValue('--muted'), line = css.getPropertyValue('--line');
-  const hist = ctx.sim.history, T = 24 * 3600, L0 = 34, R0 = 34, T0 = 8, B0 = 18;
-  const X = (t) => L0 + (t / T) * (W - L0 - R0);
-  const imax = Math.max(1, ...hist.map((r) => r.i)), qmax = Math.max(0.01, ...hist.map((r) => r.q));
-  g.strokeStyle = line; g.strokeRect(L0, T0, W - L0 - R0, H - T0 - B0);
-  g.font = '10px system-ui'; g.fillStyle = muted;
-  for (let h = 0; h <= 24; h += 6) { g.textAlign = 'center'; g.fillText(`${h}h`, X(h * 3600), H - 5); }
-  // rain bars from top
-  g.fillStyle = '#6b9ef0aa';
-  for (let k = 1; k < hist.length; k++) { const a = hist[k - 1], b = hist[k], hh = (b.i / imax) * (H - T0 - B0) * 0.45; g.fillRect(X(a.t), T0, Math.max(1, X(b.t) - X(a.t) - 0.5), hh); }
-  // outflow line
-  g.strokeStyle = '#c8423a'; g.lineWidth = 2; g.beginPath();
-  hist.forEach((r, k) => { const y = H - B0 - (r.q / qmax) * (H - T0 - B0) * 0.9; (k ? g.lineTo : g.moveTo).call(g, X(r.t), y); }); g.stroke();
-  g.fillStyle = muted; g.textAlign = 'left'; g.fillText(`${(imax / 25.4).toFixed(2)} in/h`, 2, T0 + 9);
-  g.textAlign = 'right'; g.fillStyle = '#c8423a'; g.fillText(`${Math.round(qmax * CFS)} cfs`, W - 2, T0 + 9);
-  // now marker
-  g.strokeStyle = muted; g.lineWidth = 1; g.beginPath(); g.moveTo(X(ctx.sim.t), T0); g.lineTo(X(ctx.sim.t), H - B0); g.stroke();
-}
-let chartT = 0;
-// Tracers: placed on wet cells (deeper water more likely), moved along the depth-averaged velocity.
-const VIS = 5;     // cells per second of screen time for 1 m/s of flow (real speeds are far too fast to see at 1 h/s)
-function respawn(tp, k) {
-  const { sim, c } = ctx, n = c.W * c.H;
-  for (let t = 0; t < 30; t++) {
-    const i = (Math.random() * n) | 0, h = sim.h[i];
-    if (h > 0.002 && Math.random() < Math.min(1, h / 0.02)) { tp.x[k] = (i % c.W) + Math.random(); tp.y[k] = ((i / c.W) | 0) + Math.random(); tp.age[k] = Math.random() * 2; return true; }
-  }
-  tp.age[k] = 1e9; return false;
-}
-function updateParticles(dtWall) {
-  const { sim, c, tp, tracers, lo } = ctx, W = c.W, H = c.H, e = exag(), dx = sim.dx, pos = tracers.geometry.attributes.position.array;
-  const { fx, fxl, fy, fyu, h, b } = sim;
+// Tracers ride the depth-averaged velocity; short trails show the direction water is moving.
+const VIS = 5;
+function updateParticles(p, dtWall) {
+  const { W, H, lo } = V, e = exag(), sim = p.sim, tp = p.tp, pos = p.tracers.geometry.attributes.position.array, tr = p.trails.geometry.attributes.position.array;
+  const { fx, fxl, fy, fyu, h, b } = sim, dx = sim.dx, n = W * H;
+  const yAt = (x, y) => { const j = Math.min(H - 1, Math.max(0, y | 0)) * W + Math.min(W - 1, Math.max(0, x | 0)); return (b[j] + h[j] - lo) * e + 0.08; };
   for (let k = 0; k < tp.n; k++) {
-    let x = tp.x[k], y = tp.y[k];
-    let ix = x | 0, iy = y | 0, i = iy * W + ix;
-    if (tp.age[k] > 6 || ix < 0 || iy < 0 || ix >= W || iy >= H || h[i] < 0.0015) { if (!respawn(tp, k)) { pos[k * 3 + 1] = -1e6; continue; } x = tp.x[k]; y = tp.y[k]; ix = x | 0; iy = y | 0; i = iy * W + ix; }
+    let x = tp.x[k], y = tp.y[k], ix = x | 0, iy = y | 0, i = iy * W + ix;
+    if (tp.age[k] > 6 || ix < 0 || iy < 0 || ix >= W || iy >= H || h[i] < 0.0015) {
+      let ok = false;
+      for (let t = 0; t < 30 && !ok; t++) { const j = (Math.random() * n) | 0; if (h[j] > 0.002 && Math.random() < Math.min(1, h[j] / 0.02)) { x = (j % W) + Math.random(); y = ((j / W) | 0) + Math.random(); ok = true; } }
+      if (!ok) { pos[k * 3 + 1] = -1e6; tr[k * 6 + 1] = tr[k * 6 + 4] = -1e6; tp.age[k] = 1e9; continue; }
+      tp.age[k] = Math.random() * 2; tp.px[k] = x; tp.py[k] = y; ix = x | 0; iy = y | 0; i = iy * W + ix;
+    }
     const hh = Math.max(h[i], 0.002);
-    // Depth-averaged velocity (m/s) from the pipe fluxes through the cell's faces.
     const u = ((fx[i] - fxl[i]) + (ix > 0 ? fx[i - 1] : 0) - (ix < W - 1 ? fxl[i + 1] : 0)) / (2 * hh * dx);
     const v = ((fy[i] - fyu[i]) + (iy > 0 ? fy[i - W] : 0) - (iy < H - 1 ? fyu[i + W] : 0)) / (2 * hh * dx);
     let mx = u * VIS * dtWall, my = v * VIS * dtWall; const m = Math.hypot(mx, my); if (m > 0.9) { mx *= 0.9 / m; my *= 0.9 / m; }
+    tp.px[k] = tp.px[k] * 0.85 + x * 0.15; tp.py[k] = tp.py[k] * 0.85 + y * 0.15; // trail tail lags behind
     tp.x[k] = x + mx; tp.y[k] = y + my; tp.age[k] += dtWall;
-    const j = (Math.min(H - 1, Math.max(0, tp.y[k] | 0))) * W + Math.min(W - 1, Math.max(0, tp.x[k] | 0));
-    pos[k * 3] = tp.x[k] * ctx.sx; pos[k * 3 + 2] = tp.y[k] * ctx.sy; pos[k * 3 + 1] = (b[j] + h[j] - lo) * e + 0.08;
+    pos[k * 3] = tp.x[k] * V.sx; pos[k * 3 + 2] = tp.y[k] * V.sy; pos[k * 3 + 1] = yAt(tp.x[k], tp.y[k]);
+    tr[k * 6] = tp.px[k] * V.sx; tr[k * 6 + 2] = tp.py[k] * V.sy; tr[k * 6 + 1] = yAt(tp.px[k], tp.py[k]);
+    tr[k * 6 + 3] = pos[k * 3]; tr[k * 6 + 4] = pos[k * 3 + 1]; tr[k * 6 + 5] = pos[k * 3 + 2];
   }
-  tracers.geometry.attributes.position.needsUpdate = true;
+  p.tracers.geometry.attributes.position.needsUpdate = true; p.trails.geometry.attributes.position.needsUpdate = true;
 }
-// Rain: count follows the current intensity; drops fall and restart above the terrain.
-function updateRain(dtWall) {
-  const { sim, c, rp, rain, lo } = ctx, e = exag(), pos = rain.geometry.attributes.position.array;
-  const now = sim.t, iNow = (sim.cumRainM(now + 300) - sim.cumRainM(now)) / 300 * 3600 / 0.0254; // in/h
-  const active = ctx.playing ? Math.min(rp.n, Math.round(rp.n * Math.min(1, iNow / 1.5))) : 0;
-  const top = Math.max(30, (Math.max(c.W * ctx.sx, c.H * ctx.sy)) * 0.15);
+function updateRain(p, dtWall) {
+  const { W, H, lo } = V, e = exag(), sim = p.sim, rp = p.rp, pos = p.rain.geometry.attributes.position.array;
+  const iNow = (sim.cumRainM(sim.t + 300) - sim.cumRainM(sim.t)) / 300 * 3600 / 0.0254;
+  const active = V.playing ? Math.min(rp.n, Math.round(rp.n * Math.min(1, iNow / 1.5))) : 0, top = Math.max(30, Math.max(W * V.sx, H * V.sy) * 0.15);
   for (let k = 0; k < rp.n; k++) {
     if (k >= active) { pos[k * 3 + 1] = -1e6; continue; }
     rp.z[k] -= top * 1.6 * dtWall;
-    if (!(rp.z[k] > 0) || rp.z[k] > top * 2) { rp.x[k] = Math.random() * c.W; rp.y[k] = Math.random() * c.H; rp.z[k] = top * (0.3 + Math.random()); }
-    const j = Math.min(c.H - 1, rp.y[k] | 0) * c.W + Math.min(c.W - 1, rp.x[k] | 0);
-    pos[k * 3] = rp.x[k] * ctx.sx; pos[k * 3 + 2] = rp.y[k] * ctx.sy; pos[k * 3 + 1] = (sim.b[j] - lo) * e + rp.z[k];
+    if (!(rp.z[k] > 0) || rp.z[k] > top * 2) { rp.x[k] = Math.random() * W; rp.y[k] = Math.random() * H; rp.z[k] = top * (0.3 + Math.random()); }
+    const j = Math.min(H - 1, rp.y[k] | 0) * W + Math.min(W - 1, rp.x[k] | 0);
+    pos[k * 3] = rp.x[k] * V.sx; pos[k * 3 + 2] = rp.y[k] * V.sy; pos[k * 3 + 1] = (sim.b[j] - lo) * e + rp.z[k];
   }
-  rain.geometry.attributes.position.needsUpdate = true;
+  p.rain.geometry.attributes.position.needsUpdate = true;
+}
+function stats(p) {
+  const sim = p.sim, b = sim.balance(), cellA = V.sx * V.sy, masked = !!V.rain;
+  let wet = 0, deep = 0, maxd = 0; for (let i = 0; i < sim.h.length; i++) { if (sim.h[i] > 0.01) wet++; if (sim.h[i] > 0.15) deep++; if (sim.maxH[i] > maxd) maxd = sim.maxH[i]; }
+  const inArea = masked ? sim.storedInMask() : b.stored;
+  return { rain: sim.cumRainM(sim.t) / 0.0254, runoff: b.excess * ACFT, onSite: inArea * ACFT, off: (masked ? b.excess - inArea - b.tile : b.out) * ACFT,
+    tile: b.tile * ACFT, peak: sim.history.reduce((m, r) => Math.max(m, r.q), 0) * CFS, wet: (wet * cellA) / 4046.86, deep: (deep * cellA) / 4046.86, maxd: maxd * M_TO_FT,
+    err: b.excess > 0 ? (100 * Math.abs(b.error)) / b.excess : 0 };
+}
+function updateStats() {
+  if (!V?.panes[0]?.sim) return;
+  const t = Math.min(...V.panes.map((p) => p.sim.t)) / 3600;
+  $('stClock').textContent = `${String(Math.floor(t)).padStart(2, '0')}:${String(Math.floor((t % 1) * 60)).padStart(2, '0')}`;
+  const S = V.panes.map(stats), masked = !!V.rain, two = S.length === 2;
+  const row = (label, f, better) => {
+    const cells = S.map((s) => `<td>${f(s)}</td>`).join('');
+    let delta = '';
+    if (two && better) { const d = better(S[1]) - better(S[0]); delta = `<td class="${Math.abs(d) < 1e-9 ? '' : d < 0 ? 'good' : 'bad'}">${d > 0 ? '+' : ''}${Math.abs(d) >= 10 ? Math.round(d).toLocaleString('en-US') : d.toFixed(1)}</td>`; }
+    else if (two) delta = '<td></td>';
+    return `<tr><th scope="row">${label}</th>${cells}${delta}</tr>`;
+  };
+  $('stStats').innerHTML = `<thead><tr><th></th>${V.panes.map((p) => `<th>${p.label || 'Value'}</th>`).join('')}${two ? '<th>Change</th>' : ''}</tr></thead><tbody>
+    ${row('Rain so far, in', (s) => s.rain.toFixed(2))}
+    ${row('Runoff, ac-ft', (s) => s.runoff.toFixed(1))}
+    ${row(masked ? 'Water on the site, ac-ft' : 'Ponded, ac-ft', (s) => s.onSite.toFixed(1))}
+    ${row(masked ? 'Ran off the site, ac-ft' : 'Left the area, ac-ft', (s) => s.off.toFixed(1), (s) => s.off)}
+    ${V.sinks.length ? row('Taken by tile, ac-ft', (s) => s.tile.toFixed(1)) : ''}
+    ${row('Peak outflow, cfs', (s) => Math.round(s.peak).toLocaleString('en-US'), (s) => s.peak)}
+    ${row('Over 6 in deep, ac', (s) => s.deep.toFixed(2), (s) => s.deep)}
+    ${row('Deepest water, ft', (s) => s.maxd.toFixed(2))}
+    ${row('Mass balance error, %', (s) => s.err.toFixed(2))}</tbody>`;
+}
+function drawChart() {
+  if (!V?.panes[0]?.sim) return;
+  const cv = $('stChart'), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight; if (!W) return;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const css = getComputedStyle(document.documentElement), muted = css.getPropertyValue('--muted'), line = css.getPropertyValue('--line');
+  const T = 24 * 3600, L0 = 34, R0 = 34, T0 = 8, B0 = 18, X = (t) => L0 + (t / T) * (W - L0 - R0);
+  const hist0 = V.panes[0].sim.history, imax = Math.max(1, ...hist0.map((r) => r.i));
+  const qmax = Math.max(0.01, ...V.panes.flatMap((p) => p.sim.history.map((r) => r.q)));
+  g.strokeStyle = line; g.strokeRect(L0, T0, W - L0 - R0, H - T0 - B0); g.font = '10px system-ui'; g.fillStyle = muted;
+  for (let h = 0; h <= 24; h += 6) { g.textAlign = 'center'; g.fillText(`${h}h`, X(h * 3600), H - 5); }
+  g.fillStyle = '#6b9ef0aa';
+  for (let k = 1; k < hist0.length; k++) { const a = hist0[k - 1], b = hist0[k]; g.fillRect(X(a.t), T0, Math.max(1, X(b.t) - X(a.t) - 0.5), (b.i / imax) * (H - T0 - B0) * 0.45); }
+  V.panes.forEach((p, n) => {
+    g.strokeStyle = V.panes.length === 2 && n === 0 ? '#7a8590' : '#c8423a'; g.lineWidth = 2; g.setLineDash(V.panes.length === 2 && n === 0 ? [5, 4] : []); g.beginPath();
+    p.sim.history.forEach((r, k) => { const y = H - B0 - (r.q / qmax) * (H - T0 - B0) * 0.9; (k ? g.lineTo : g.moveTo).call(g, X(r.t), y); }); g.stroke();
+  });
+  g.setLineDash([]); g.fillStyle = muted; g.textAlign = 'left'; g.fillText(`${(imax / 25.4).toFixed(2)} in/h`, 2, T0 + 9);
+  g.textAlign = 'right'; g.fillStyle = '#c8423a'; g.fillText(`${Math.round(qmax * CFS)} cfs`, W - 2, T0 + 9);
+  g.strokeStyle = muted; g.lineWidth = 1; g.beginPath(); g.moveTo(X(V.panes[0].sim.t), T0); g.lineTo(X(V.panes[0].sim.t), H - B0); g.stroke();
+  $('stChartKey').innerHTML = V.panes.length === 2 ? '<span class="sw rain"></span>Rain <span class="sw dash"></span>Existing outflow <span class="sw flow"></span>Proposed outflow' : '<span class="sw rain"></span>Rain intensity <span class="sw flow"></span>Outflow';
 }
 function loop() {
-  if (!ctx) return;
-  ctx.raf = requestAnimationFrame(loop);
-  const { sim } = ctx;
-  if (ctx.playing) {
-    const speed = +$('stSpeed').value; // simulated seconds per wall second
-    const target = Math.min(24 * 3600 + 2 * 3600, sim.t + speed / 60);
-    const done = sim.run(target, 14);
+  if (!V) return;
+  V.raf = requestAnimationFrame(loop);
+  const now = performance.now(), dtw = Math.min(0.1, (now - V.lastFrame) / 1000); V.lastFrame = now;
+  if (V.playing && V.panes[0]?.sim) {
+    // Advance every pane toward the same storm time so the comparison stays in step.
+    const t0 = Math.min(...V.panes.map((p) => p.sim.t)), target = Math.min(26 * 3600, t0 + +$('stSpeed').value / 60), budget = 14 / V.panes.length;
+    for (const p of V.panes) p.sim.run(target, budget);
     updateWater();
-    const nowT = performance.now(), dtw = Math.min(0.1, (nowT - ctx.lastFrame) / 1000); ctx.lastFrame = nowT;
-    updateParticles(dtw); updateRain(dtw);
-    if (performance.now() - chartT > 250) { chartT = performance.now(); updateStats(); drawChart(); }
-    if (done && sim.t >= 26 * 3600) { ctx.playing = false; $('stPlay').textContent = 'Replay'; updateStats(); drawChart(); }
+    for (const p of V.panes) { updateParticles(p, dtw); updateRain(p, dtw); }
+    if (now - V.chartT > 250) { V.chartT = now; updateStats(); drawChart(); }
+    if (Math.min(...V.panes.map((p) => p.sim.t)) >= 26 * 3600) { setPlaying(false); $('stPlay').textContent = 'Replay'; updateStats(); drawChart(); }
   }
-  ctx.controls.update();
-  ctx.renderer.render(ctx.scene, ctx.camera);
+  for (const p of V.panes) { p.controls.update(); p.renderer.render(p.scene, p.camera); }
 }
-function reset() {
-  if (!ctx) return;
-  const { c, sx, sy } = ctx;
-  ctx.sim = new StormSim(c.z, c.W, c.H, Math.sqrt(sx * sy), { depthIn: +$('stDepth').value || 5, CN: Math.min(98, Math.max(30, +$('stCN').value || 78)), drain: c.drain, rainMask: c.rain, sinks: c.sinks, manning: +$('stN').value || 0.06 });
-  updateWater(); updateStats(); drawChart();
-}
+function setPlaying(on) { V.playing = on; $('stPlay').textContent = on ? 'Pause' : 'Play storm'; }
 export function closeStorm() {
-  if (!ctx) return;
-  cancelAnimationFrame(ctx.raf); window.removeEventListener('resize', resize);
-  ctx.terrain.geometry.dispose(); ctx.water.geometry.dispose(); ctx.tracers.geometry.dispose(); ctx.rain.geometry.dispose(); ctx.renderer.dispose();
-  ctx = null;
+  if (!V) return;
+  cancelAnimationFrame(V.raf); window.removeEventListener('resize', resize);
+  V.panes.forEach(disposePane); V.imagery?.dispose(); V = null;
   $('storm').hidden = true; document.body.classList.remove('modal-open');
 }
-// Wire controls once.
-$('stPlay').onclick = () => {
-  if (!ctx) return;
-  if (ctx.sim.t >= 26 * 3600) reset();
-  ctx.playing = !ctx.playing; $('stPlay').textContent = ctx.playing ? 'Pause' : 'Play storm';
-};
-$('stReset').onclick = () => { if (ctx) { ctx.playing = false; $('stPlay').textContent = 'Play storm'; reset(); } };
+$('stPlay').onclick = () => { if (!V) return; if (V.panes[0].sim.t >= 26 * 3600) resetSims(); setPlaying(!V.playing); };
+$('stReset').onclick = () => { if (V) { setPlaying(false); resetSims(); } };
 $('stClose').onclick = closeStorm;
-$('stExag').oninput = () => ctx && setExaggeration();
-$('stShowMax').onchange = () => ctx && updateWater();
-['stDepth', 'stCN', 'stN'].forEach((id) => $(id).addEventListener('change', () => { if (ctx) { ctx.playing = false; $('stPlay').textContent = 'Play storm'; reset(); } }));
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && ctx) closeStorm(); });
-window.__storm = { get ctx() { return ctx; } };
+$('stExag').oninput = () => V && applyLook();
+$('stLook').onchange = () => V && applyLook();
+$('stShowMax').onchange = () => V && updateWater();
+$('stCompare').onchange = () => { if (V) { const was = V.playing; buildPanes(); setPlaying(was); } };
+['stDepth', 'stCN', 'stN'].forEach((id) => $(id).addEventListener('change', () => { if (V) { setPlaying(false); resetSims(); } }));
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && V) closeStorm(); });
+// Test hook: state of the viewer (first pane mirrors the old single-pane fields).
+window.__storm = { get ctx() { if (!V) return null; const p = V.panes[V.panes.length - 1]; return { sim: p.sim, playing: V.playing, c: { W: V.W, H: V.H, rain: V.rain, sinks: V.sinks }, tracers: p.tracers, rain: p.rain, renderer: p.renderer, panes: V.panes, V }; } };

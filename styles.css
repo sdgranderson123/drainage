@@ -62,6 +62,10 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--line); border-
 .status.err { color: var(--cut); }
 .okline { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: var(--acc-soft); }
 #svResult { margin-top: 10px; display: grid; gap: 6px; }
+ul.scanlist { list-style: none; margin: 6px 0; padding: 0; max-height: 260px; overflow: auto; display: grid; gap: 4px; }
+ul.scanlist label { display: flex; gap: 8px; align-items: flex-start; } ul.scanlist small { color: var(--muted); }
+#svScanResult { margin-top: 8px; display: grid; gap: 6px; }
+#svSuggest { margin-top: 4px; }
 ul.cadlayers { list-style: none; margin: 6px 0 0; padding: 0; max-height: 240px; overflow: auto; display: grid; gap: 2px; font-size: 13px; }
 ul.cadlayers label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 ul.cadlayers .sw { width: 14px; height: 4px; border-radius: 2px; flex: none; }
@@ -143,7 +147,15 @@ body.modal-open { overflow: hidden; }
 .sthead h2 { margin: 0; flex: 1; }
 .clock { font-variant-numeric: tabular-nums; font-size: 15px; }
 .stbody { flex: 1; display: flex; min-height: 0; }
-#stCanvas { flex: 1; min-width: 0; height: 100%; display: block; touch-action: none; }
+#stViews { flex: 1; min-width: 0; height: 100%; display: grid; gap: 2px; background: var(--line); }
+#stViews.two { grid-template-columns: 1fr 1fr; }
+.stpane { position: relative; min-width: 0; min-height: 0; }
+.stpane canvas { width: 100%; height: 100%; display: block; touch-action: none; }
+.stlabel { position: absolute; left: 10px; top: 10px; background: rgb(20 24 22 / .75); color: #fff; padding: 3px 9px; border-radius: 6px; font-weight: 600; font-size: 13px; }
+table.cmp td.good { color: var(--acc); font-weight: 600; } table.cmp td.bad { color: var(--cut); font-weight: 600; }
+.sw.dash { background: repeating-linear-gradient(90deg, #7a8590 0 4px, transparent 4px 7px); margin-left: 8px; }
+.stside label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
+.stside label.switch { flex-direction: row; color: var(--fg); font-size: 14px; }
 .stside { width: 340px; overflow: auto; padding: 12px; border-left: 1px solid var(--line); background: var(--card); display: flex; flex-direction: column; gap: 10px; }
 .stside .row { margin-top: 0; }
 #stChart { width: 100%; height: 130px; background: var(--bg); border-radius: 8px; }
@@ -186,7 +198,7 @@ body.modal-open { overflow: hidden; }
   .panel { width: auto; border-left: 0; overflow: visible; }
   .drawbar { width: calc(100% - 24px); top: 8px; }
   .stbody { flex-direction: column; }
-  #stCanvas { flex: none; height: 48vh; }
+  #stViews { flex: none; height: 48vh; } #stViews.two { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; height: 70vh; }
   .stside { width: auto; border-left: 0; border-top: 1px solid var(--line); }
   .rp { grid-template-columns: repeat(3, 1fr); }
   .mapmsg { bottom: 40px; font-size: 13px; }
