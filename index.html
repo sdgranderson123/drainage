@@ -14,6 +14,15 @@
 <body>
 <header class="top">
   <h1 class="brand"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7"/><path d="M4 22l8-7 5 4 11-10"/></svg><span>FieldGrade</span></h1>
+  <nav class="pjbar" aria-label="Project">
+    <span id="pjName" class="pjname">Untitled project</span>
+    <button type="button" class="btn sm" id="pjNew">New</button>
+    <button type="button" class="btn sm" id="pjOpen">Open</button>
+    <button type="button" class="btn sm" id="pjSave" title="Ctrl+S">Save</button>
+    <button type="button" class="btn sm" id="pjExport">Export</button>
+    <button type="button" class="btn sm icon" id="pjUndo" title="Undo (Ctrl+Z)" aria-label="Undo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7L4 12l5 5"/><path d="M4 12h10a6 6 0 0 1 0 12h-2"/></svg></button>
+    <button type="button" class="btn sm icon" id="pjRedo" title="Redo (Ctrl+Y)" aria-label="Redo" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 7l5 5-5 5"/><path d="M20 12H10a6 6 0 0 0 0 12h2"/></svg></button>
+  </nav>
   <form id="search" class="search" role="search">
     <label class="sr" for="q">Find a place or coordinates</label>
     <input id="q" type="search" placeholder="Address, town, or lat, lon" autocomplete="off">
@@ -99,6 +108,10 @@
       <div id="svScanResult" class="small"></div>
       <div class="row"><button type="button" class="btn primary" id="svLoad">Load files</button><button type="button" class="btn" id="svRemove" hidden>Remove all</button></div>
       <div id="svResult" class="small"></div>
+      <div class="row">
+        <button type="button" class="btn" id="svDrawOutline">Draw site outline</button>
+        <button type="button" class="btn" id="svAutoOutline">Use the drawing's outline</button>
+      </div>
       <div id="svNext" class="row" hidden>
         <button type="button" class="btn primary" id="sv3dStorm">Storm 3D: existing vs proposed</button>
         <button type="button" class="btn" id="sv3d">3D view</button>
@@ -211,6 +224,11 @@
   </aside>
 </main>
 
+<dialog id="pjDlg" class="pjdlg" aria-labelledby="pjDlgTitle">
+  <div class="cardhead"><h2 id="pjDlgTitle">Project</h2><button type="button" class="link" id="pjDlgClose" aria-label="Close">✕</button></div>
+  <div id="pjDlgBody"></div>
+</dialog>
+
 <div id="storm" class="storm" hidden role="dialog" aria-modal="true" aria-labelledby="stTitle">
   <div class="sthead">
     <h2 id="stTitle">Storm simulation</h2>
@@ -244,6 +262,8 @@
   </div>
 </div>
 
+<!-- Import-map polyfill for Safari < 16.4 / older browsers; does nothing where import maps are native. -->
+<script async src="https://cdn.jsdelivr.net/npm/es-module-shims@1.10.0/dist/es-module-shims.js" integrity="sha384-BTO8nLHukFlPxTSib9wgQyLgd2oYLxp24Goxje82QeHp7cwyUtgx4Z32PCEb3Q09" crossorigin="anonymous"></script>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"
   integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="anonymous"></script>

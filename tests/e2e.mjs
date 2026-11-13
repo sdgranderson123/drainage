@@ -54,6 +54,8 @@ async function newPage(opts = {}) {
   page.on('pageerror', (e) => page.errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && page.errors.push(m.text()));
   await page.route('**/arcgisonline.com/**/tile/**', (r) => r.fulfill({ body: PNG, contentType: 'image/png' }));
+  // Satellite imagery for the 3D view: a 1-pixel image with CORS so tests don't depend on Esri.
+  await page.route('**/World_Imagery/MapServer/export**', (r) => r.fulfill({ body: PNG, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } }));
   await page.route('**/geocode.arcgis.com/**', (r) => r.fulfill({ json: { candidates: [{ address: 'Test Farm, MS', location: { x: LON0, y: LAT0 }, extent: { xmin: LON0 - 0.01, ymin: LAT0 - 0.01, xmax: LON0 + 0.01, ymax: LAT0 + 0.01 } }] } }));
   // NWI wetlands mock: one emergent wetland covering the NE quarter of the test field.
   await page.route('**/wetlandsmapservice/**', (r) => r.fulfill({ json: { type: 'FeatureCollection', features: [{ type: 'Feature',
@@ -409,10 +411,10 @@ console.log('Design import: CAD linework, closed shapes, rock, proposed (FG) sur
   };
   // fence edge: x = 80 m east of the centre, y = 45 m north (outside the rock area)
   await page.evaluate(([a, b]) => window.__fg.map.setView([a, b], 17, { animate: false }), [LAT0, LON0]);
-  await clickShape(LAT0 + 45 / 111194.9, LON0 + 80 / (111194.9 * Math.cos(LAT0 * Math.PI / 180)), 'field');
+  // The fence is now used as the site outline automatically when the drawing loads.
   await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.design && window.__fg.busy === 0, null, { timeout: 60000 });
   const fa = await page.evaluate(() => window.__fg.field.area);
-  check(near(fa, 160 * 120, 160 * 120 * 0.02), `fence used as field outline (${(fa / 4046.86).toFixed(2)} ac ≈ ${(19200 / 4046.86).toFixed(2)} ac)`);
+  check(near(fa, 160 * 120, 160 * 120 * 0.02), `fence used as the site outline automatically (${(fa / 4046.86).toFixed(2)} ac ≈ ${(19200 / 4046.86).toFixed(2)} ac)`);
   // rock edge: x = 50, y = 20 (away from the tile line at y = 0)
   await clickShape(LAT0 + 20 / 111194.9, LON0 + 50 / (111194.9 * Math.cos(LAT0 * Math.PI / 180)), 'rock');
   await page.waitForFunction(() => window.__fg.design?.info.length === 1 && window.__fg.busy === 0, null, { timeout: 60000 });
@@ -467,6 +469,82 @@ console.log('3D straight from Survey & design files');
   check(near(fa, 160 * 120, 160 * 120 * 0.02), `no field drawn: the drawing's fence was used (${(fa / 4046.86).toFixed(2)} ac)`);
   check(!page.errors.length, 'no console errors', page.errors.join(' | '));
   await page.context().close();
+}
+console.log('Auto site outline from an open fence polyline');
+{
+  surface = plane; const page = await newPage();
+  await page.route('**/crs-us.json', (r) => r.fulfill({ path: path.join(ROOT, 'crs-us.json') }));
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', 'site_plan_openfence.dxf'));
+  await page.selectOption('#svRole', 'linework'); await page.selectOption('#svCrs', 'auto');
+  await page.click('#svLoad');
+  await page.waitForFunction(() => window.__fg.field?.dem && window.__fg.design && window.__fg.busy === 0, null, { timeout: 120000 });
+  const fa = await page.evaluate(() => window.__fg.field.area), txt = await page.textContent('#svResult');
+  check(/Site outline set from the C-FENCE outline/.test(txt), 'outline picked automatically from the open fence line', txt.slice(-160));
+  check(near(fa, 160 * 120, 160 * 120 * 0.02), `outline area ${(fa / 4046.86).toFixed(2)} ac (fence)`);
+  check(await page.locator('.vtx').count() >= 4, 'corner handles shown so the outline can be dragged');
+  await page.click('#sv3d');
+  await page.waitForFunction(() => window.__storm.ctx?.panes.length === 1, null, { timeout: 120000 });
+  check(true, '3D view opens from the card');
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
+console.log('Projects: own outline, undo/redo, save, new, open, export/import');
+{
+  surface = plane; const page = await newPage();
+  await page.route('**/crs-us.json', (r) => r.fulfill({ path: path.join(ROOT, 'crs-us.json') }));
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', 'site_plan.dxf'));
+  await page.selectOption('#svRole', 'linework'); await page.selectOption('#svCrs', 'auto');
+  await page.click('#svLoad');
+  await page.waitForFunction(() => window.__fg.cad && window.__fg.field?.dem && window.__fg.busy === 0, null, { timeout: 120000 });
+  // Draw my own proposed outline (smaller than the fence) from the Survey & design card.
+  await page.click('#svDrawOutline');
+  await page.evaluate(([a, b]) => window.__fg.map.setView([a, b], 17, { animate: false }), [LAT0, LON0]);
+  const box = await page.locator('#map').boundingBox();
+  const px = async (x, y) => page.evaluate(([la, lo]) => { const p = window.__fg.map.latLngToContainerPoint([la, lo]); return [p.x, p.y]; },
+    [LAT0 + y / 111194.9, LON0 + x / (111194.9 * Math.cos(LAT0 * Math.PI / 180))]);
+  for (const [x, y] of [[-40, -30], [40, -30], [40, 30], [-40, 30]]) { const [cx, cy] = await px(x, y); await page.mouse.click(box.x + cx, box.y + cy); }
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.__fg.field?.plane && Math.abs(window.__fg.field.area - 4800) < 200 && window.__fg.busy === 0, null, { timeout: 60000 });
+  check(true, 'drew my own site outline from the Survey & design card (80 × 60 m)');
+  await page.waitForTimeout(400);
+  const h0 = await page.evaluate(() => window.__fg.hist);
+  await page.evaluate(([a, b]) => window.__fg.addEdit('pond', [[a - 0.0001, b - 0.0001], [a - 0.0001, b + 0.0001], [a - 0.0002, b + 0.0001], [a - 0.0002, b - 0.0001]]), [LAT0, LON0]);
+  await page.waitForFunction(() => window.__fg.design?.info.length === 1 && window.__fg.busy === 0, null, { timeout: 60000 });
+  await page.waitForTimeout(400);
+  check(!(await page.isDisabled('#pjUndo')), 'Undo enabled after a change');
+  await page.click('#pjUndo');
+  await page.waitForFunction(() => window.__fg.edits.length === 0 && window.__fg.busy === 0, null, { timeout: 30000 });
+  check(true, 'Undo removes the pond');
+  await page.keyboard.press('Control+y');
+  await page.waitForFunction(() => window.__fg.edits.length === 1 && window.__fg.busy === 0, null, { timeout: 30000 });
+  check(true, 'Redo (Ctrl+Y) brings it back');
+  // Save
+  await page.click('#pjSave'); await page.fill('#pjSaveName', 'Test site A'); await page.click('#pjSaveForm button[type=submit]');
+  await page.waitForFunction(() => /Saved/.test(document.querySelector('#status').textContent), null, { timeout: 20000 });
+  check((await page.textContent('#pjName')) === 'Test site A', 'Save names the project');
+  // Export
+  const [dl] = await Promise.all([page.waitForEvent('download'), page.click('#pjExport')]);
+  const exported = fs.readFileSync(await dl.path(), 'utf8');
+  check(dl.suggestedFilename() === 'Test site A.fieldgrade.json' && /"cad"/.test(exported), `Export downloads ${dl.suggestedFilename()} with the drawing included`);
+  // New
+  await page.click('#pjNew'); await page.click('#pjNewYes');
+  await page.waitForFunction(() => !window.__fg.field && !window.__fg.cad && window.__fg.edits.length === 0, null, { timeout: 10000 });
+  check(true, 'New clears the outline, edits and drawing');
+  // Open saved
+  await page.click('#pjOpen'); await page.click('.pjopen');
+  await page.waitForFunction(() => window.__fg.field?.plane && window.__fg.cad && window.__fg.edits.length === 1 && window.__fg.busy === 0, null, { timeout: 120000 });
+  const fa = await page.evaluate(() => window.__fg.field.area);
+  check(near(fa, 4800, 200), `Open restores my outline (${Math.round(fa)} m²), the pond and the drawing`);
+  // Import the exported file in a fresh page
+  const p2 = await newPage();
+  await p2.click('#pjOpen');
+  await p2.setInputFiles('#pjFile', { name: 'site.fieldgrade.json', mimeType: 'application/json', buffer: Buffer.from(exported) });
+  await p2.waitForFunction(() => window.__fg.field?.plane && window.__fg.cad && window.__fg.edits.length === 1 && window.__fg.busy === 0, null, { timeout: 120000 });
+  check((await p2.textContent('#pjName')) === 'Test site A', 'exported file opens on another session with everything in it');
+  check(!page.errors.length && !p2.errors.length, 'no console errors', [...page.errors, ...p2.errors].join(' | '));
+  await page.context().close(); await p2.context().close();
 }
 console.log('Folder scan');
 {

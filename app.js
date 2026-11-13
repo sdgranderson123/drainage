@@ -111,20 +111,40 @@ try { const e = localStorage.getItem('fg:lastEpsg'); if (e) $('svEpsg').value = 
 $('svLoad').onclick = () => importSurvey();
 // 3D from the Survey & design card: use the field outline if there is one, otherwise the drawing's site boundary
 // (fence / boundary / largest closed outline) or the extent of the design surface or survey.
+// Pick a site outline from what was loaded: a closed shape (fence/boundary layers first), a fence/boundary
+// polyline that nearly closes, else a rectangle around the drawing (or the design/survey extent).
+function autoOutline() {
+  const SITE = /FENCE|BOUND|LIMIT|SITE|PROP|ROW|PARCEL/i;
+  let best = null;
+  const consider = (ring, name, closedFlag) => {
+    if (ring.length < 3) return;
+    const a = areaOf(ring); if (!(a > 50)) return; // ignore symbols / tiny shapes
+    const score = a * (SITE.test(name) ? 4 : 1) * (closedFlag ? 1 : 0.9);
+    if (!best || score > best.score) best = { score, pts: ring.slice(), name };
+  };
+  if (cad) for (const [name, l] of Object.entries(cad.layers)) l.group.eachLayer((sh) => {
+    if (sh instanceof L.Polygon) { consider(sh.getLatLngs()[0], name, true); return; }
+    if (!SITE.test(name)) return;
+    // Open polyline on a site layer: treat as closed when its ends are close relative to its length.
+    const pts = sh.getLatLngs(); if (pts.length < 3) return;
+    let len = 0; for (let k = 1; k < pts.length; k++) len += map.distance(pts[k - 1], pts[k]);
+    if (map.distance(pts[0], pts[pts.length - 1]) <= Math.max(3, len * 0.4)) consider(pts, name, false); // gate gaps, or a side left open
+  });
+  if (best) return { pts: best.pts, from: `the ${best.name} outline` };
+  let b = cad?.bounds;
+  const ext = (designSurf || survey)?.extent;
+  if (!b && ext) b = L.latLngBounds([[ext.s, ext.w], [ext.n, ext.e]]);
+  if (!b) return null;
+  b = b.pad(0.1);
+  return { pts: [b.getNorthWest(), b.getNorthEast(), b.getSouthEast(), b.getSouthWest()], from: cad?.bounds ? 'the extent of the drawing' : 'the extent of the surface' };
+}
 async function ensureField() {
   if (field?.dem && design) return true;
   if (!field) {
-    let best = null;
-    if (cad) for (const [name, l] of Object.entries(cad.layers)) l.group.eachLayer((sh) => {
-      if (!(sh instanceof L.Polygon)) return;
-      const ring = sh.getLatLngs()[0]; if (ring.length < 3) return;
-      const a = areaOf(ring) * (/FENCE|BOUND|LIMIT|SITE|PROP/i.test(name) ? 4 : 1);
-      if (!best || a > best.a) best = { a, pts: ring.slice() };
-    });
-    const ext = (designSurf || survey)?.extent;
-    const pts = best?.pts || (ext && [L.latLng(ext.n, ext.w), L.latLng(ext.n, ext.e), L.latLng(ext.s, ext.e), L.latLng(ext.s, ext.w)]);
-    if (!pts) { hint('Outline the site first (Field cut & fill), or load a drawing or design surface.'); return false; }
-    setField(pts);
+    const o = autoOutline();
+    if (!o) { hint('Load a drawing or surface, or outline the site with Field cut & fill.'); return false; }
+    setField(o.pts);
+    hint(`Site outline taken from ${o.from}. Drag the white corner handles to adjust it.`);
   }
   for (let k = 0; k < 600 && !(field?.dem && design && busy === 0); k++) await new Promise((r) => setTimeout(r, 200));
   return !!(field?.dem && design);
@@ -194,7 +214,7 @@ async function importSurvey(filesOverride) {
     const def = await epsgDef(code), tf = await transformFor(def, $('svZ').value), maxEdgeM = (+$('svEdge').value || 200) * 0.3048;
     // CAD linework from every drawing, in one overlay.
     const lw = parsed.filter((p) => p.linework);
-    if (lw.length) setCad(lw, tf, files.map((f) => f.name));
+    if (lw.length) { setCad(lw, tf, files.map((f) => f.name)); cad.src = { lw: lw.map((p) => ({ linework: p.linework })), def, code }; }
     // Elevations: merge all files that carry 3D data.
     const withZ = parsed.filter((p) => p.xyz.length >= 9);
     const msgs = [];
@@ -206,7 +226,7 @@ async function importSurvey(filesOverride) {
       const extent = surveyExtent(sv, tf.toLL);
       if (!(Math.abs(extent.lat) <= 90 && Math.abs(extent.lon) <= 180) || extent.n - extent.s > 2 || extent.e - extent.w > 2)
         throw new Error(`With EPSG:${code} the points land in an impossible place. The coordinate system is probably wrong.`);
-      const entry = { sv, tf, extent, code, def, maxEdgeM, name: withZ.map((p) => p.name).join(', ') };
+      const entry = { sv, tf, extent, code, def, maxEdgeM, zUnits: $('svZ').value, name: withZ.map((p) => p.name).join(', ') };
       status('Comparing with USGS lidar…');
       const pad = 0.0005, cmpDem = await fetchLidar({ s: extent.s - pad, n: extent.n + pad, w: extent.w - pad, e: extent.e + pad }, { maxPx: 600, onProgress: (m) => status(m) });
       const g = gridSurvey(cmpDem, sv, tf.toLL, tf.zScale, await Delaunator(), { maxEdgeM });
@@ -225,6 +245,10 @@ async function importSurvey(filesOverride) {
     else if (how) msgs.unshift(`<div>Coordinate system EPSG:${code} (${how}).</div>`);
     $('svResult').innerHTML = msgs.join(''); $('svRemove').hidden = false; status('');
     $('svNext').hidden = !(designSurf || cad || survey);
+    if (!field && (designSurf || cad)) {
+      const o = autoOutline();
+      if (o) { setField(o.pts); msgs.push(`<div class="okline">Site outline set from ${o.from}. Drag the white corner handles on the map to adjust it; results update.</div>`); $('svResult').innerHTML = msgs.join(''); }
+    }
     const sel = $('svSuggest'); if (sel) sel.onchange = () => { $('svCrs').value = 'epsg'; $('svEpsg').hidden = false; $('svEpsg').value = sel.value; importSurvey(files); };
     if (cad?.bounds && !withZ.length) map.fitBounds(cad.bounds, { padding: [60, 60], maxZoom: 19, animate: false });
     reloadAllSurfaces();
@@ -503,7 +527,11 @@ $('bUndo').onclick = () => { draw.pts.pop(); updateDraw(); };
 $('bCancel').onclick = cancelDraw;
 $('bDone').onclick = finishDraw;
 document.addEventListener('keydown', (e) => {
-  if (e.target.closest('input, textarea, select')) return;
+  if (e.target.closest('input, textarea, select') || dlg.open) return;
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && !draw.mode && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) { e.preventDefault(); undo(); return; }
+  if (mod && !draw.mode && (e.key === 'y' || ((e.key === 'z' || e.key === 'Z') && e.shiftKey))) { e.preventDefault(); redo(); return; }
+  if (mod && (e.key === 's' || e.key === 'S')) { e.preventDefault(); $('pjSave').click(); return; }
   if (e.key === 'Escape') cancelDraw();
   else if (e.key === 'Enter' && draw.mode) { e.preventDefault(); finishDraw(); }
   else if ((e.key === 'Backspace' || (e.key === 'z' && (e.ctrlKey || e.metaKey))) && draw.mode) { e.preventDefault(); draw.pts.pop(); updateDraw(); }
@@ -540,7 +568,8 @@ function editable(pts, isPoly, onChange) {
 let profile = null;
 function setProfile(pts) {
   profile?.edit.remove(); profile?.cursor && map.removeLayer(profile.cursor);
-  profile = { pts, edit: editable(pts.slice(), false, (p) => { profile.pts = p; computeProfile(); }), rows: [], dem: null, cursor: null };
+  profile = { pts, edit: editable(pts.slice(), false, (p) => { profile.pts = p; store.set('profile', p.map((q) => [q.lat, q.lng])); computeProfile(); commitSoon(); }), rows: [], dem: null, cursor: null };
+  commitSoon();
   store.set('profile', pts.map((p) => [p.lat, p.lng]));
   $('intro').hidden = true;
   computeProfile();
@@ -667,8 +696,10 @@ $('profCsv').onclick = () => profile && download('profile.csv', toCSV(['distance
 // ---------------- field cut / fill ----------------
 let field = null, overlay = null;
 function setField(pts) {
+  const oldDem = field?.dem;
   field?.edit.remove();
-  field = { pts, edit: editable(pts.slice(), true, (p) => { field.pts = p; loadField(); }) };
+  field = { pts, dem: oldDem, edit: editable(pts.slice(), true, (p) => { field.pts = p; store.set('field', p.map((q) => [q.lat, q.lng])); loadField(); commitSoon(); }) };
+  commitSoon();
   store.set('field', pts.map((p) => [p.lat, p.lng]));
   $('intro').hidden = true;
   loadField();
@@ -780,7 +811,7 @@ const EDIT_COLORS = { pond: '#2d68c4', grade: '#e07b00', tile: '#7a3cc8', rock: 
 const EDIT_LABEL = { pond: 'Pond', grade: 'Raise / lower', tile: 'Drain tile', rock: 'Rock surfacing' };
 let edits = (store.get('edits') || []).filter((e) => e && Array.isArray(e.pts));
 let designLayers = [], editLayers = [], wetLayer = null, design = null, designSeq = 0;
-function saveEdits() { store.set('edits', edits); }
+function saveEdits() { store.set('edits', edits); commitSoon(); }
 function clearDesignLayers() { [...designLayers, ...editLayers].forEach((l) => map.removeLayer(l)); designLayers = []; editLayers = []; if (wetLayer) map.removeLayer(wetLayer); wetLayer = null; }
 ['bPond', 'bGrade', 'bTile', 'bRock'].forEach((id) => { $(id).onclick = () => {
   if (!field?.dem) { hint('Outline the field first (Field cut & fill), then add ponds, tile or grading inside it.'); return; }
@@ -932,7 +963,7 @@ function openDesignStorm({ autoplay = true } = {}) {
   });
   for (const e of edits) lines.push({ pts: e.pts, color: EDIT_COLORS[e.type], closed: e.type !== 'tile' });
   openStorm(d, { proposed: changed ? design.z : null, outline: field.pts.map((p) => [p.lat, p.lng]), lines, autoplay,
-    title: `${autoplay ? 'Storm on' : '3D view of'} the ${(field.area * M2_TO_AC).toFixed(0)}-acre site${changed ? ': existing vs proposed' : ''}`,
+    title: `${autoplay ? 'Storm on' : '3D view of'} the ${(field.area * M2_TO_AC).toFixed(field.area * M2_TO_AC < 10 ? 1 : 0)}-acre site${changed ? ': existing vs proposed' : ''}`,
     mask: field.mask, sinks, depthIn: designDepth(), CN: +$('cn').value || 78, maxCells: 128 });
 }
 $('sdStorm').onclick = () => openDesignStorm();
@@ -1045,6 +1076,7 @@ function drawChannels() {
 function setShed(ll) {
   if (shed) shed.layers.forEach((l) => map.removeLayer(l));
   shed = { outlet: ll, layers: [] };
+  commitSoon();
   store.set('shed', [ll.lat, ll.lng]);
   $('intro').hidden = true;
   $('noaaLink').href = `https://hdsc.nws.noaa.gov/pfds/pfds_map_cont.html?lat=${ll.lat.toFixed(4)}&lon=${ll.lng.toFixed(4)}`;
@@ -1117,7 +1149,7 @@ function drawShed() {
   m.on('dragend', () => {
     const p = m.getLatLng(), b = L.latLngBounds([[dem.s, dem.w], [dem.n, dem.e]]).pad(-0.1);
     shed.outlet = p; store.set('shed', [p.lat, p.lng]);
-    computeShed();
+    computeShed(); commitSoon();
   });
   shed.layers = [img, box, lfp, m];
 }
@@ -1173,20 +1205,25 @@ $('shedCsv').onclick = () => shed?.ws && download('drainage-area.csv', toCSV(
     Math.round(shed.L * M_TO_FT), Math.round(shed.Tc * 60), Math.round(shed.CN), r.y ? `${r.y}-yr 24-h` : '', r.P ?? '', r.Q?.toFixed(3) ?? '', r.vol?.toFixed(2) ?? '', r.q?.toFixed(1) ?? ''])));
 
 // ---------------- remove ----------------
+function clearProfile() {
+  if (!profile) return;
+  profSeq++; profile.edit.remove(); if (profile.cursor) map.removeLayer(profile.cursor); profile = null;
+  $('profBox').hidden = true; store.set('profile', null);
+}
+function clearField() {
+  if (!field) return;
+  fieldSeq++; field.edit.remove(); if (overlay) map.removeLayer(overlay); overlay = null; clearDesignLayers(); field = null; $('sdBox').hidden = true;
+  $('fieldBox').hidden = true; store.set('field', null); renderLegend();
+}
+function clearShed() {
+  if (!shed) return;
+  shedSeq++; shed.layers.forEach((l) => map.removeLayer(l)); shed = null;
+  $('shedBox').hidden = true; store.set('shed', null);
+}
+function updateIntro() { $('intro').hidden = !!(profile || field || shed); }
 document.querySelectorAll('[data-clear]').forEach((b) => b.addEventListener('click', () => {
-  if (b.dataset.clear === 'profile' && profile) {
-    profSeq++; profile.edit.remove(); if (profile.cursor) map.removeLayer(profile.cursor); profile = null;
-    $('profBox').hidden = true; store.set('profile', null);
-  }
-  if (b.dataset.clear === 'field' && field) {
-    fieldSeq++; field.edit.remove(); if (overlay) map.removeLayer(overlay); overlay = null; clearDesignLayers(); field = null; $('sdBox').hidden = true;
-    $('fieldBox').hidden = true; store.set('field', null); renderLegend();
-  }
-  if (b.dataset.clear === 'shed' && shed) {
-    shedSeq++; shed.layers.forEach((l) => map.removeLayer(l)); shed = null;
-    $('shedBox').hidden = true; store.set('shed', null);
-  }
-  $('intro').hidden = !!(profile || field || shed);
+  ({ profile: clearProfile, field: clearField, shed: clearShed })[b.dataset.clear]?.();
+  updateIntro(); commitSoon();
 }));
 
 function download(name, text) {
@@ -1195,6 +1232,151 @@ function download(name, text) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
+
+// ---------------- project: undo/redo, save, open, export, new ----------------
+// Light state (outline, edits, profile, outlet, inputs) goes in the undo history. Imported files (drawing,
+// survey, design surface) are part of a saved/exported project but not of undo.
+const INPUTS = ['slope', 'heading', 'ratio', 'cn', 'landUse', 'hsg', 'tcMethod', 'shedRadius', 'p2', 'p10', 'p25', 'p50', 'p100'];
+let restoring = false, hist = [], histAt = -1, commitT, projectName = store.get('projectName') || '';
+const llArr = (pts) => pts.map((p) => [+p.lat.toFixed(8), +p.lng.toFixed(8)]);
+function lightState() {
+  return { field: field ? llArr(field.pts) : null, profile: profile ? llArr(profile.pts) : null, shed: shed ? llArr([shed.outlet])[0] : null,
+    edits: JSON.parse(JSON.stringify(edits)), mode: document.querySelector('input[name=mode]:checked').value,
+    inputs: Object.fromEntries(INPUTS.map((id) => [id, $(id).value])) };
+}
+function commitSoon() { if (restoring) return; clearTimeout(commitT); commitT = setTimeout(commit, 250); }
+function commit() {
+  const st = JSON.stringify(lightState());
+  if (hist[histAt] === st) return;
+  hist = hist.slice(0, histAt + 1); hist.push(st); if (hist.length > 100) hist.shift(); histAt = hist.length - 1;
+  updateProjectUI();
+}
+async function applyLight(st) {
+  restoring = true;
+  try {
+    for (const [id, v] of Object.entries(st.inputs || {})) if ($(id) && v != null) $(id).value = v;
+    const m = document.querySelector(`input[name=mode][value="${st.mode || 'fit'}"]`); if (m) m.checked = true;
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    if (!same(st.profile, profile ? llArr(profile.pts) : null)) { if (st.profile) setProfile(toLL(st.profile)); else clearProfile(); }
+    if (!same(st.shed, shed ? llArr([shed.outlet])[0] : null)) { if (st.shed) setShed(L.latLng(...st.shed)); else clearShed(); }
+    const editsChanged = !same(st.edits, edits);
+    edits = JSON.parse(JSON.stringify(st.edits || [])); store.set('edits', edits);
+    if (!same(st.field, field ? llArr(field.pts) : null)) { if (st.field) setField(toLL(st.field)); else clearField(); }
+    else if (field?.dem) { computeField(); if (editsChanged) refreshDesign(); }
+    store.set('rain', Object.fromEntries(RP.map((y) => [y, parseFloat($(`p${y}`).value)]).filter(([, v]) => Number.isFinite(v))));
+    if (shed?.ws) shedResults();
+    updateIntro();
+  } finally { setTimeout(() => { restoring = false; }, 0); }
+}
+function undo() { if (histAt > 0) { histAt--; applyLight(JSON.parse(hist[histAt])); updateProjectUI(); } }
+function redo() { if (histAt < hist.length - 1) { histAt++; applyLight(JSON.parse(hist[histAt])); updateProjectUI(); } }
+function updateProjectUI() {
+  $('pjUndo').disabled = histAt <= 0; $('pjRedo').disabled = histAt >= hist.length - 1;
+  $('pjName').textContent = projectName || 'Untitled project';
+}
+INPUTS.forEach((id) => $(id).addEventListener('change', commitSoon));
+document.querySelectorAll('input[name=mode]').forEach((r) => r.addEventListener('change', commitSoon));
+
+// Full project = light state + imported data (typed arrays kept as-is in IndexedDB; base64 in exported files).
+function entryData(e) {
+  return e && { sv: { xyz: e.sv.xyz, faces: e.sv.faces, kind: e.sv.kind, note: e.sv.note }, code: e.code, def: e.def, zUnits: e.zUnits || 'auto',
+    maxEdgeM: e.maxEdgeM, name: e.name, extent: e.extent, cmp: e.cmp, coverAc: e.coverAc };
+}
+function projectData() {
+  return { app: 'FieldGrade', version: 1, name: projectName, savedAt: new Date().toISOString(), state: lightState(),
+    view: { ...map.getCenter(), z: map.getZoom() }, survey: entryData(survey), designSurf: entryData(designSurf), cad: cad?.src || null };
+}
+async function restoreEntry(d) {
+  if (!d) return null;
+  const tf = await transformFor(d.def, d.zUnits || 'auto');
+  return { ...d, sv: { ...d.sv }, tf };
+}
+async function loadProject(pj) {
+  await withBusy(async () => {
+    status('Opening project…');
+    newProject(true);
+    projectName = pj.name || ''; store.set('projectName', projectName); updateProjectUI();
+    if (pj.view) map.setView([pj.view.lat, pj.view.lng], pj.view.z, { animate: false });
+    survey = await restoreEntry(pj.survey); designSurf = await restoreEntry(pj.designSurf);
+    if (survey) drawSurvey(survey, 'existing'); if (designSurf) drawSurvey(designSurf, 'design');
+    if (pj.cad) { const tf = await transformFor(pj.cad.def, 'auto'); setCad(pj.cad.lw, tf, ['project']); cad.src = pj.cad; }
+    if (survey || designSurf || cad) { $('svNext').hidden = false; $('svRemove').hidden = false; $('svResult').innerHTML = `<div>Opened with ${[survey && 'existing-ground survey', designSurf && 'proposed design surface', cad && 'drawing linework'].filter(Boolean).join(', ')}.</div>`; }
+    hist = []; histAt = -1;
+    await applyLight(pj.state || {});
+    setTimeout(commit, 300);
+    status(`Opened “${projectName || 'project'}”.`);
+  });
+}
+function newProject(silent) {
+  restoring = true;
+  cancelDraw(); clearProfile(); clearShed(); clearField();
+  for (const e of [survey, designSurf]) (e?.layers || []).forEach((l) => map.removeLayer(l));
+  survey = null; designSurf = null; clearCad(); flow = null;
+  edits = []; store.set('edits', edits);
+  $('svResult').innerHTML = ''; $('svNext').hidden = true; $('svRemove').hidden = true; $('svScanResult').innerHTML = '';
+  projectName = ''; store.set('projectName', '');
+  updateIntro(); restoring = false;
+  hist = []; histAt = -1; commit();
+  if (!silent) status('New project.');
+}
+
+// IndexedDB store for saved projects.
+const idb = () => new Promise((res, rej) => { const r = indexedDB.open('fieldgrade', 1); r.onupgradeneeded = () => r.result.createObjectStore('projects', { keyPath: 'name' }); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+async function idbDo(mode, fn) { const db = await idb(); return new Promise((res, rej) => { const tx = db.transaction('projects', mode), out = fn(tx.objectStore('projects')); tx.oncomplete = () => res(out.result); tx.onerror = () => rej(tx.error); }); }
+async function saveProject(name) {
+  projectName = name; store.set('projectName', name);
+  await idbDo('readwrite', (st) => st.put(projectData()));
+  updateProjectUI(); status(`Saved “${name}” in this browser.`);
+}
+// Export: JSON with typed arrays as base64.
+const b64 = (ta) => { const u = new Uint8Array(ta.buffer, ta.byteOffset, ta.byteLength); let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000)); return btoa(s); };
+const unb64 = (str, T) => { const s = atob(str), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return new T(u.buffer); };
+function encodeArrays(o) { return JSON.stringify(o, (k, v) => (v instanceof Float64Array ? { $f64: b64(v) } : v instanceof Uint32Array ? { $u32: b64(v) } : v)); }
+function decodeArrays(text) { return JSON.parse(text, (k, v) => (v && v.$f64 ? unb64(v.$f64, Float64Array) : v && v.$u32 ? unb64(v.$u32, Uint32Array) : v)); }
+function exportProject() {
+  const name = (projectName || 'fieldgrade-project').replace(/[^\w\- ]+/g, '').trim() || 'fieldgrade-project';
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([encodeArrays(projectData())], { type: 'application/json' })); a.download = `${name}.fieldgrade.json`;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  status(`Exported ${a.download}.`);
+}
+
+// Toolbar and dialogs
+const dlg = $('pjDlg');
+function openDialog(title, html) { $('pjDlgTitle').textContent = title; $('pjDlgBody').innerHTML = html; dlg.showModal(); }
+$('pjDlgClose').onclick = () => dlg.close();
+$('pjUndo').onclick = undo; $('pjRedo').onclick = redo;
+$('pjExport').onclick = exportProject;
+$('pjNew').onclick = () => {
+  openDialog('Start a new project?', `<p>This clears the outline, changes, profile, drainage outlet and imported files from the map. Saved projects are kept.</p>
+    <div class="row"><button type="button" class="btn primary" id="pjNewYes">Start new</button><button type="button" class="btn" id="pjNewNo">Cancel</button></div>`);
+  $('pjNewYes').onclick = () => { dlg.close(); newProject(); }; $('pjNewNo').onclick = () => dlg.close();
+};
+$('pjSave').onclick = () => {
+  openDialog('Save project', `<form id="pjSaveForm" class="grid2"><label class="span2">Project name<input id="pjSaveName" required value="${(projectName || '').replace(/"/g, '&quot;')}" placeholder="e.g. North Substation grading"></label>
+    <div class="row span2"><button type="submit" class="btn primary">Save</button><button type="button" class="btn" id="pjSaveCancel">Cancel</button></div></form>
+    <p class="small muted">Saved in this browser on this computer. Use Export to share it or open it elsewhere.</p>`);
+  $('pjSaveName').focus(); $('pjSaveCancel').onclick = () => dlg.close();
+  $('pjSaveForm').onsubmit = (e) => { e.preventDefault(); const n = $('pjSaveName').value.trim(); if (!n) return; dlg.close(); withBusy(() => saveProject(n)); };
+};
+$('pjOpen').onclick = async () => {
+  let list = [];
+  try { list = await idbDo('readonly', (st) => st.getAll()); } catch { /* private mode */ }
+  list.sort((a, b) => (b.savedAt || '').localeCompare(a.savedAt || ''));
+  openDialog('Open project', `${list.length ? `<ul class="pjlist">${list.map((p, k) => `<li><button type="button" class="link pjopen" data-k="${k}"><b>${p.name}</b></button>
+      <small>${new Date(p.savedAt).toLocaleString()}</small><button type="button" class="link pjdel" data-k="${k}">Delete</button></li>`).join('')}</ul>` : '<p class="small muted">No saved projects in this browser yet.</p>'}
+    <div class="row"><label class="btn filebtn">Open an exported file…<input type="file" id="pjFile" accept=".json,application/json" class="sr"></label></div>`);
+  dlg.querySelectorAll('.pjopen').forEach((b) => b.onclick = () => { dlg.close(); loadProject(list[+b.dataset.k]); });
+  dlg.querySelectorAll('.pjdel').forEach((b) => b.onclick = async () => { await idbDo('readwrite', (st) => st.delete(list[+b.dataset.k].name)); b.closest('li').remove(); });
+  $('pjFile').onchange = async () => {
+    const f = $('pjFile').files[0]; if (!f) return; dlg.close();
+    try { const pj = decodeArrays(await f.text()); if (pj.app !== 'FieldGrade') throw new Error(); loadProject(pj); }
+    catch { status('That file is not a FieldGrade project.', true); }
+  };
+};
+// Draw your own site outline from the Survey & design card.
+$('svDrawOutline').onclick = () => { startDraw('field'); hint('Click the corners of your proposed site. Double-click or press Enter to finish. It replaces the current outline.'); };
+$('svAutoOutline').onclick = () => { const o = autoOutline(); if (!o) { hint('Load a drawing or surface first.'); return; } setField(o.pts); hint(`Site outline taken from ${o.from}. Drag the white corner handles to adjust it.`); };
 
 // ---------------- restore last session ----------------
 const toLL = (a) => (Array.isArray(a) ? a.filter((p) => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite)).map(([a1, b1]) => L.latLng(a1, b1)) : []);
@@ -1205,7 +1387,8 @@ const toLL = (a) => (Array.isArray(a) ? a.filter((p) => Array.isArray(p) && p.le
   const o = toLL([store.get('shed')].filter(Boolean));
   if (o.length) setShed(o[0]);
   if (store.get('relief')) { $('relief').checked = true; $('reliefOpts').hidden = false; loadRelief(); }
+  hist = []; histAt = -1; setTimeout(commit, 400); updateProjectUI();
 }
 
 // Test hook (read-only state + programmatic drawing).
-window.__fg = { get survey() { return survey; }, get designSurf() { return designSurf; }, get cad() { return cad; }, importSurvey, get design() { return design; }, get edits() { return edits; }, addEdit: (t, p) => addEdit(t, p.map(([a, b]) => L.latLng(a, b))), map, setField, setProfile, setShed, get shed() { return shed; }, get flow() { return flow; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };
+window.__fg = { undo, redo, get hist() { return { n: hist.length, at: histAt }; }, projectData, loadProject, decodeArrays, encodeArrays, newProject, get survey() { return survey; }, get designSurf() { return designSurf; }, get cad() { return cad; }, importSurvey, get design() { return design; }, get edits() { return edits; }, addEdit: (t, p) => addEdit(t, p.map(([a, b]) => L.latLng(a, b))), map, setField, setProfile, setShed, get shed() { return shed; }, get flow() { return flow; }, get field() { return field; }, get profile() { return profile; }, get relief() { return relief; }, get busy() { return busy; } };
