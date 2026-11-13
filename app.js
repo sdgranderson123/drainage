@@ -111,20 +111,40 @@ try { const e = localStorage.getItem('fg:lastEpsg'); if (e) $('svEpsg').value = 
 $('svLoad').onclick = () => importSurvey();
 // 3D from the Survey & design card: use the field outline if there is one, otherwise the drawing's site boundary
 // (fence / boundary / largest closed outline) or the extent of the design surface or survey.
+// Pick a site outline from what was loaded: a closed shape (fence/boundary layers first), a fence/boundary
+// polyline that nearly closes, else a rectangle around the drawing (or the design/survey extent).
+function autoOutline() {
+  const SITE = /FENCE|BOUND|LIMIT|SITE|PROP|ROW|PARCEL/i;
+  let best = null;
+  const consider = (ring, name, closedFlag) => {
+    if (ring.length < 3) return;
+    const a = areaOf(ring); if (!(a > 50)) return; // ignore symbols / tiny shapes
+    const score = a * (SITE.test(name) ? 4 : 1) * (closedFlag ? 1 : 0.9);
+    if (!best || score > best.score) best = { score, pts: ring.slice(), name };
+  };
+  if (cad) for (const [name, l] of Object.entries(cad.layers)) l.group.eachLayer((sh) => {
+    if (sh instanceof L.Polygon) { consider(sh.getLatLngs()[0], name, true); return; }
+    if (!SITE.test(name)) return;
+    // Open polyline on a site layer: treat as closed when its ends are close relative to its length.
+    const pts = sh.getLatLngs(); if (pts.length < 3) return;
+    let len = 0; for (let k = 1; k < pts.length; k++) len += map.distance(pts[k - 1], pts[k]);
+    if (map.distance(pts[0], pts[pts.length - 1]) <= Math.max(3, len * 0.4)) consider(pts, name, false); // gate gaps, or a side left open
+  });
+  if (best) return { pts: best.pts, from: `the ${best.name} outline` };
+  let b = cad?.bounds;
+  const ext = (designSurf || survey)?.extent;
+  if (!b && ext) b = L.latLngBounds([[ext.s, ext.w], [ext.n, ext.e]]);
+  if (!b) return null;
+  b = b.pad(0.1);
+  return { pts: [b.getNorthWest(), b.getNorthEast(), b.getSouthEast(), b.getSouthWest()], from: cad?.bounds ? 'the extent of the drawing' : 'the extent of the surface' };
+}
 async function ensureField() {
   if (field?.dem && design) return true;
   if (!field) {
-    let best = null;
-    if (cad) for (const [name, l] of Object.entries(cad.layers)) l.group.eachLayer((sh) => {
-      if (!(sh instanceof L.Polygon)) return;
-      const ring = sh.getLatLngs()[0]; if (ring.length < 3) return;
-      const a = areaOf(ring) * (/FENCE|BOUND|LIMIT|SITE|PROP/i.test(name) ? 4 : 1);
-      if (!best || a > best.a) best = { a, pts: ring.slice() };
-    });
-    const ext = (designSurf || survey)?.extent;
-    const pts = best?.pts || (ext && [L.latLng(ext.n, ext.w), L.latLng(ext.n, ext.e), L.latLng(ext.s, ext.e), L.latLng(ext.s, ext.w)]);
-    if (!pts) { hint('Outline the site first (Field cut & fill), or load a drawing or design surface.'); return false; }
-    setField(pts);
+    const o = autoOutline();
+    if (!o) { hint('Load a drawing or surface, or outline the site with Field cut & fill.'); return false; }
+    setField(o.pts);
+    hint(`Site outline taken from ${o.from}. Drag the white corner handles to adjust it.`);
   }
   for (let k = 0; k < 600 && !(field?.dem && design && busy === 0); k++) await new Promise((r) => setTimeout(r, 200));
   return !!(field?.dem && design);
@@ -225,6 +245,10 @@ async function importSurvey(filesOverride) {
     else if (how) msgs.unshift(`<div>Coordinate system EPSG:${code} (${how}).</div>`);
     $('svResult').innerHTML = msgs.join(''); $('svRemove').hidden = false; status('');
     $('svNext').hidden = !(designSurf || cad || survey);
+    if (!field && (designSurf || cad)) {
+      const o = autoOutline();
+      if (o) { setField(o.pts); msgs.push(`<div class="okline">Site outline set from ${o.from}. Drag the white corner handles on the map to adjust it; results update.</div>`); $('svResult').innerHTML = msgs.join(''); }
+    }
     const sel = $('svSuggest'); if (sel) sel.onchange = () => { $('svCrs').value = 'epsg'; $('svEpsg').hidden = false; $('svEpsg').value = sel.value; importSurvey(files); };
     if (cad?.bounds && !withZ.length) map.fitBounds(cad.bounds, { padding: [60, 60], maxZoom: 19, animate: false });
     reloadAllSurfaces();
@@ -932,7 +956,7 @@ function openDesignStorm({ autoplay = true } = {}) {
   });
   for (const e of edits) lines.push({ pts: e.pts, color: EDIT_COLORS[e.type], closed: e.type !== 'tile' });
   openStorm(d, { proposed: changed ? design.z : null, outline: field.pts.map((p) => [p.lat, p.lng]), lines, autoplay,
-    title: `${autoplay ? 'Storm on' : '3D view of'} the ${(field.area * M2_TO_AC).toFixed(0)}-acre site${changed ? ': existing vs proposed' : ''}`,
+    title: `${autoplay ? 'Storm on' : '3D view of'} the ${(field.area * M2_TO_AC).toFixed(field.area * M2_TO_AC < 10 ? 1 : 0)}-acre site${changed ? ': existing vs proposed' : ''}`,
     mask: field.mask, sinks, depthIn: designDepth(), CN: +$('cn').value || 78, maxCells: 128 });
 }
 $('sdStorm').onclick = () => openDesignStorm();

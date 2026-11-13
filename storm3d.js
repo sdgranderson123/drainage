@@ -15,6 +15,7 @@ let V = null; // viewer state
 // same grid), outline [[lat, lon]], lines [{ pts: [[lat, lon]], color }], autoplay, compare, maxCells }
 export function openStorm(dem, opts = {}) {
   closeStorm();
+  if (!webglOK()) { alertBox('3D needs WebGL, which is turned off or unavailable in this browser. Try Chrome, Edge, Firefox or Safari with hardware acceleration on.'); return null; }
   const base = coarsen(dem.data, dem.W, dem.H, dem.dx, dem.dy, opts.maxCells || 128);
   const prop = opts.proposed ? coarsen(opts.proposed, dem.W, dem.H, dem.dx, dem.dy, opts.maxCells || 128) : null;
   const f = base.f, W = base.W, H = base.H;
@@ -49,6 +50,8 @@ export function openStorm(dem, opts = {}) {
   return V;
 }
 
+function webglOK() { try { const c = document.createElement('canvas'); return !!(c.getContext('webgl2') || c.getContext('webgl')); } catch { return false; } }
+function alertBox(msg) { const el = document.getElementById('mapmsg'); if (!el) return; el.hidden = false; el.className = 'mapmsg err'; document.getElementById('mapmsgText').textContent = msg; }
 // (Re)create panes for the current compare setting.
 function buildPanes() {
   const cam = V.panes[0] ? { p: V.panes[0].camera.position.clone(), t: V.panes[0].controls.target.clone() } : null;
@@ -107,12 +110,16 @@ function grid(W, H, sx, sy, uv) {
 function disposePane(p) { p.terrain.geometry.dispose(); p.water.geometry.dispose(); p.tracers.geometry.dispose(); p.rain.geometry.dispose(); p.trails.geometry.dispose(); p.renderer.dispose(); }
 
 // ---- look: satellite imagery or elevation colours; tint where the design changes the ground ----
-function loadImagery() {
-  const { ext } = V, aspect = ((ext.e - ext.w) * Math.cos(((ext.n + ext.s) / 2) * Math.PI / 180)) / (ext.n - ext.s);
-  const w = aspect >= 1 ? 2048 : Math.round(2048 * aspect), h = aspect >= 1 ? Math.round(2048 / aspect) : 2048;
+function loadImagery(maxPx = 2048) {
+  const { ext } = V, latc = (ext.n + ext.s) / 2;
+  const wm = (ext.e - ext.w) * 111320 * Math.cos(latc * Math.PI / 180), hm = (ext.n - ext.s) * 111320;
+  // No finer than ~0.3 m per pixel: Esri's export returns an error when asked for more detail than it has.
+  const px = Math.max(256, Math.min(maxPx, Math.round(Math.max(wm, hm) / 0.3)));
+  const w = wm >= hm ? px : Math.max(64, Math.round((px * wm) / hm)), h = wm >= hm ? Math.max(64, Math.round((px * hm) / wm)) : px;
   const url = `${IMAGERY}?bbox=${ext.w},${ext.s},${ext.e},${ext.n}&bboxSR=4326&imageSR=4326&size=${w},${h}&format=jpg&f=image`;
-  new THREE.TextureLoader().setCrossOrigin('anonymous').load(url, (tex) => { if (!V) return; tex.colorSpace = THREE.SRGBColorSpace; V.imagery = tex; applyLook(); },
-    undefined, () => { if (V) { V.imageryFailed = true; applyLook(); } });
+  const v = V;
+  new THREE.TextureLoader().setCrossOrigin('anonymous').load(url, (tex) => { if (V !== v) return; tex.colorSpace = THREE.SRGBColorSpace; V.imagery = tex; applyLook(); },
+    undefined, () => { if (V !== v) return; if (px > 512) loadImagery(512); else { V.imageryFailed = true; applyLook(); } });
 }
 function applyLook() {
   const sat = $('stLook').value === 'satellite' && V.imagery;

@@ -302,7 +302,8 @@ export function dxfCrsNotes(text) {
     const c = lines[i].trim(); if (c !== '1' && c !== '3') continue; // text strings only
     const t = lines[i + 1].replace(/\\[A-Za-z][^;]*;|[{}]|\\P/g, ' ').replace(/\s+/g, ' ');
     if (!re.test(t)) continue;
-    for (const sent of t.split(/(?<=\.)\s+|\s(?=\d\.\s)/)) if (re.test(sent)) hits.add(sent.trim().slice(0, 160));
+    // Split into sentences without regex lookbehind (a syntax error before Safari 16.4).
+    for (const sent of t.replace(/\.\s+/g, '.\n').replace(/\s(?=\d\.\s)/g, '\n').split('\n')) if (re.test(sent)) hits.add(sent.trim().slice(0, 160));
   }
   return [...hits].slice(0, 4);
 }

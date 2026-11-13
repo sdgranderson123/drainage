@@ -468,6 +468,25 @@ console.log('3D straight from Survey & design files');
   check(!page.errors.length, 'no console errors', page.errors.join(' | '));
   await page.context().close();
 }
+console.log('Auto site outline from an open fence polyline');
+{
+  surface = plane; const page = await newPage();
+  await page.route('**/crs-us.json', (r) => r.fulfill({ path: path.join(ROOT, 'crs-us.json') }));
+  await page.click('#bSurvey');
+  await page.setInputFiles('#svFile', path.join(ROOT, 'tests', 'fixtures', 'site_plan_openfence.dxf'));
+  await page.selectOption('#svRole', 'linework'); await page.selectOption('#svCrs', 'auto');
+  await page.click('#svLoad');
+  await page.waitForFunction(() => window.__fg.field?.dem && window.__fg.design && window.__fg.busy === 0, null, { timeout: 120000 });
+  const fa = await page.evaluate(() => window.__fg.field.area), txt = await page.textContent('#svResult');
+  check(/Site outline set from the C-FENCE outline/.test(txt), 'outline picked automatically from the open fence line', txt.slice(-160));
+  check(near(fa, 160 * 120, 160 * 120 * 0.02), `outline area ${(fa / 4046.86).toFixed(2)} ac (fence)`);
+  check(await page.locator('.vtx').count() >= 4, 'corner handles shown so the outline can be dragged');
+  await page.click('#sv3d');
+  await page.waitForFunction(() => window.__storm.ctx?.panes.length === 1, null, { timeout: 120000 });
+  check(true, '3D view opens from the card');
+  check(!page.errors.length, 'no console errors', page.errors.join(' | '));
+  await page.context().close();
+}
 console.log('Folder scan');
 {
   const page = await newPage();
