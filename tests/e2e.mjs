@@ -54,6 +54,8 @@ async function newPage(opts = {}) {
   page.on('pageerror', (e) => page.errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && !/Failed to load resource/.test(m.text()) && page.errors.push(m.text()));
   await page.route('**/arcgisonline.com/**/tile/**', (r) => r.fulfill({ body: PNG, contentType: 'image/png' }));
+  // Satellite imagery for the 3D view: a 1-pixel image with CORS so tests don't depend on Esri.
+  await page.route('**/World_Imagery/MapServer/export**', (r) => r.fulfill({ body: PNG, contentType: 'image/png', headers: { 'access-control-allow-origin': '*' } }));
   await page.route('**/geocode.arcgis.com/**', (r) => r.fulfill({ json: { candidates: [{ address: 'Test Farm, MS', location: { x: LON0, y: LAT0 }, extent: { xmin: LON0 - 0.01, ymin: LAT0 - 0.01, xmax: LON0 + 0.01, ymax: LAT0 + 0.01 } }] } }));
   // NWI wetlands mock: one emergent wetland covering the NE quarter of the test field.
   await page.route('**/wetlandsmapservice/**', (r) => r.fulfill({ json: { type: 'FeatureCollection', features: [{ type: 'Feature',

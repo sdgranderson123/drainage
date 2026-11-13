@@ -1295,7 +1295,7 @@ async function loadProject(pj) {
   await withBusy(async () => {
     status('Opening project…');
     newProject(true);
-    projectName = pj.name || ''; store.set('projectName', projectName);
+    projectName = pj.name || ''; store.set('projectName', projectName); updateProjectUI();
     if (pj.view) map.setView([pj.view.lat, pj.view.lng], pj.view.z, { animate: false });
     survey = await restoreEntry(pj.survey); designSurf = await restoreEntry(pj.designSurf);
     if (survey) drawSurvey(survey, 'existing'); if (designSurf) drawSurvey(designSurf, 'design');
