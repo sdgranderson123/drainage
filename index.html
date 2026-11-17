@@ -86,6 +86,7 @@
       <div class="grid2">
         <label class="span2">Files (pick a drawing and its xrefs together)<input id="svFile" type="file" multiple accept=".csv,.txt,.pnezd,.xyz,.dxf,.xml,.landxml,.las,.laz,.dwg"></label>
         <label class="span2">Use the elevations as<select id="svRole">
+          <option value="auto">Automatic: proposed if the file name says PROP / FG / DESIGN / GRAD, else existing</option>
           <option value="existing">Existing ground (survey / EG)</option>
           <option value="design">Proposed design (FG / finished grade)</option>
           <option value="linework">Linework only (no elevations)</option></select></label>

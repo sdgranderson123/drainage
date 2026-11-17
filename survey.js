@@ -20,7 +20,7 @@ export function parsePoints(text, order = 'PNEZD') {
 
 // ASCII DXF: POINT, 3DFACE (as a TIN), LINE, LWPOLYLINE (with elevation), POLYLINE/VERTEX, INSERT with Z.
 export function parseDXF(text) {
-  const lines = text.split(/\r?\n/), pts = [], faces = [];
+  const lines = text.split(/\r?\n/), pts = [], faces = [], labels = [];
   if (/^AutoCAD Binary DXF/.test(text.slice(0, 22))) throw new Error('Binary DXF is not supported. Save as ASCII DXF.');
   let i = 0, inEntities = false;
   const read = () => { const c = +lines[i]; const v = (lines[i + 1] ?? '').trim(); i += 2; return [c, v]; };
@@ -28,7 +28,12 @@ export function parseDXF(text) {
   const flush = () => {
     if (!ent) return;
     const g = ent.g, num = (c, k = 0) => (g[c] && g[c][k] !== undefined ? +g[c][k] : NaN);
+    if (g[67]?.[0] === '1') { ent = null; return; } // paper space (sheets, title blocks)
     switch (ent.type) {
+      // Spot elevations written as text ("1456.25", "FG 1456.25", "TC=1455.8", "EL. 1454.0") and survey point
+      // blocks with an elevation attribute: elevation at the text's insertion point.
+      case 'TEXT': case 'MTEXT': { const z = labelElevation((g[1] || []).join('') + (g[3] || []).join('')); if (z !== null) labels.push(num(10), num(20), z); break; }
+      case 'ATTRIB': { if (/^(ELEV|ELEVATION|ELEV\.?|Z|EL|ELV)$/i.test(g[2]?.[0] || '')) { const z = labelElevation(g[1]?.[0] || ''); if (z !== null) labels.push(num(10), num(20), z); } break; }
       case 'POINT': pushPt(num(10), num(20), num(30)); break;
       case 'INSERT': if (num(30)) pushPt(num(10), num(20), num(30)); break;
       case 'LINE': if (num(30) || num(31)) { pushPt(num(10), num(20), num(30)); pushPt(num(11), num(21), num(31)); } break;
@@ -62,7 +67,23 @@ export function parseDXF(text) {
   }
   flush();
   const f = faces.filter((x) => x >= 0);
-  return { xyz: Float64Array.from(pts), faces: f.length ? Uint32Array.from(f) : null, kind: f.length ? 'tin' : 'points' };
+  // Use text elevations only when the drawing has no real 3D geometry, and only the consistent ones
+  // (within 60 units of their median: drops sheet numbers, dimensions and stray numbers).
+  let note = '';
+  if (pts.length < 9 && labels.length >= 9) {
+    const zs = []; for (let k = 2; k < labels.length; k += 3) zs.push(labels[k]);
+    const med = zs.slice().sort((a, b) => a - b)[zs.length >> 1];
+    for (let k = 0; k < labels.length; k += 3) if (Number.isFinite(labels[k]) && Number.isFinite(labels[k + 1]) && Math.abs(labels[k + 2] - med) <= 60) pts.push(labels[k], labels[k + 1], labels[k + 2]);
+    note = `${(pts.length / 3).toLocaleString()} spot elevations read from text labels`;
+  }
+  return { xyz: Float64Array.from(pts), faces: f.length ? Uint32Array.from(f) : null, kind: f.length ? 'tin' : 'points', note, fromLabels: !!note };
+}
+// Elevation in a label, or null. Plain numbers need a decimal and 2–5 digits ("1456.25"); prefixed labels
+// (FG, EG, TC, TW, BW, FL, EL, ELEV, G, SPOT) are read with or without "=" / ":".
+export function labelElevation(raw) {
+  const t = String(raw).replace(/\\[A-Za-z][^;]*;|[{}]|\\P/g, ' ').replace(/%%[a-z]/gi, '').trim();
+  const m = t.match(/^(?:(?:FG|EG|TC|TW|BW|FL|FFE|EL|ELEV|G|SPOT|GR)\.?\s*[=:]?\s*)?(\d{2,5}\.\d{1,3})(?:\s*(?:'|FT|M))?$/i);
+  return m ? +m[1] : null;
 }
 
 // LandXML: <Surface> TIN (Pnts/Faces) and/or <CgPoint>s. Coordinates are "northing easting elevation".

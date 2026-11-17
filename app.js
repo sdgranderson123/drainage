@@ -180,7 +180,20 @@ $('svFolder').onchange = async () => {
 };
 $('svRemove').onclick = () => {
   $('svNext').hidden = true; for (const e of [survey, designSurf]) (e?.layers || []).forEach((l) => map.removeLayer(l)); survey = null; designSurf = null; clearCad(); $('svResult').innerHTML = ''; $('svRemove').hidden = true; reloadAllSurfaces(); };
-let designSurf = null, cad = null;
+let designSurf = null, cad = null, lastImport = null;
+const xrefFile = (x) => (x.path || '').split(/[\\/]/).pop() || `${x.name}.dwg`;
+// Look for the missing xref drawings in a picked folder (any subfolder) and load them with the main drawing.
+function findXrefs(folderFiles) {
+  if (!lastImport?.missing.length) return;
+  const want = new Map(lastImport.missing.map((x) => [xrefFile(x).toLowerCase(), x]));
+  for (const x of lastImport.missing) { want.set(`${x.name.toLowerCase()}.dwg`, x); want.set(`${x.name.toLowerCase()}.dxf`, x); want.set(xrefFile(x).toLowerCase().replace(/\.dwg$/, '.dxf'), x); }
+  const found = folderFiles.filter((f) => want.has(f.name.toLowerCase()));
+  const names = new Set(found.map((f) => f.name.toLowerCase()));
+  const still = lastImport.missing.filter((x) => ![xrefFile(x).toLowerCase(), `${x.name.toLowerCase()}.dwg`, `${x.name.toLowerCase()}.dxf`].some((n) => names.has(n)));
+  if (!found.length) { status(`None of ${lastImport.missing.map(xrefFile).join(', ')} are in that folder. Try the project's top folder.`, true); return; }
+  if (still.length) hint(`Found ${found.length}; still missing: ${still.map(xrefFile).join(', ')}.`);
+  importSurvey([...lastImport.files, ...found]);
+}
 let folderNotes = [];
 async function importSurvey(filesOverride) {
   const files = filesOverride || [...$('svFile').files];
@@ -215,31 +228,42 @@ async function importSurvey(filesOverride) {
     // CAD linework from every drawing, in one overlay.
     const lw = parsed.filter((p) => p.linework);
     if (lw.length) { setCad(lw, tf, files.map((f) => f.name)); cad.src = { lw: lw.map((p) => ({ linework: p.linework })), def, code }; }
-    // Elevations: merge all files that carry 3D data.
+    // Elevations: group files by role (automatic: proposed design by file name, else existing ground) and
+    // merge the files of each role that carry 3D data.
+    const DESIGN_RE = /PROP|DESIGN|\bFG\b|[-_ ]FG|FINISH|GRAD/i;
+    const roleOf = (p) => (role === 'auto' ? (DESIGN_RE.test(p.name) ? 'design' : 'existing') : role);
     const withZ = parsed.filter((p) => p.xyz.length >= 9);
     const msgs = [];
-    if (role !== 'linework' && withZ.length) {
-      const n = withZ.reduce((a, p) => a + p.xyz.length, 0), xyz = new Float64Array(n); let o = 0;
-      const faces = [], kind = withZ.some((p) => p.kind === 'cloud') ? 'cloud' : withZ.length === 1 && withZ[0].faces ? 'tin' : 'points';
-      for (const p of withZ) { if (kind === 'tin') faces.push(...p.faces); xyz.set(p.xyz, o); o += p.xyz.length; }
-      const sv = { xyz, faces: kind === 'tin' ? Uint32Array.from(faces) : null, kind, note: withZ.map((p) => p.note).filter(Boolean).join('; ') };
+    for (const r of ['existing', 'design']) {
+      const grp = role === 'linework' ? [] : withZ.filter((p) => roleOf(p) === r);
+      if (!grp.length) continue;
+      const n = grp.reduce((a, p) => a + p.xyz.length, 0), xyz = new Float64Array(n); let o = 0;
+      const faces = [], kind = grp.some((p) => p.kind === 'cloud') ? 'cloud' : grp.length === 1 && grp[0].faces ? 'tin' : 'points';
+      for (const p of grp) { if (kind === 'tin') faces.push(...p.faces); xyz.set(p.xyz, o); o += p.xyz.length; }
+      const sv = { xyz, faces: kind === 'tin' ? Uint32Array.from(faces) : null, kind, note: grp.map((p) => p.note).filter(Boolean).join('; ') };
       const extent = surveyExtent(sv, tf.toLL);
       if (!(Math.abs(extent.lat) <= 90 && Math.abs(extent.lon) <= 180) || extent.n - extent.s > 2 || extent.e - extent.w > 2)
         throw new Error(`With EPSG:${code} the points land in an impossible place. The coordinate system is probably wrong.`);
-      const entry = { sv, tf, extent, code, def, maxEdgeM, zUnits: $('svZ').value, name: withZ.map((p) => p.name).join(', ') };
+      const entry = { sv, tf, extent, code, def, maxEdgeM, zUnits: $('svZ').value, name: grp.map((p) => p.name).join(', ') };
       status('Comparing with USGS lidar…');
       const pad = 0.0005, cmpDem = await fetchLidar({ s: extent.s - pad, n: extent.n + pad, w: extent.w - pad, e: extent.e + pad }, { maxPx: 600, onProgress: (m) => status(m) });
       const g = gridSurvey(cmpDem, sv, tf.toLL, tf.zScale, await Delaunator(), { maxEdgeM });
       entry.cmp = compareSurfaces(g.z, cmpDem.data); entry.coverAc = (g.cells * cmpDem.dx * cmpDem.dy) / 4046.86;
-      if (role === 'design') designSurf = entry; else survey = entry;
-      drawSurvey(entry, role);
+      if (r === 'design') { (designSurf?.layers || []).forEach((l) => map.removeLayer(l)); designSurf = entry; } else { (survey?.layers || []).forEach((l) => map.removeLayer(l)); survey = entry; }
+      drawSurvey(entry, r);
       map.fitBounds([[extent.s, extent.w], [extent.n, extent.e]], { padding: [40, 40], animate: false });
-      msgs.push(surveyResultHTML(entry, role, how));
-    } else if (role !== 'linework') msgs.push(`<div class="warn">No elevations found in ${files.map((f) => f.name).join(', ')}. Civil 3D surfaces don’t survive a plain DWG/DXF: export the surface with <b>Output → Export to LandXML</b>, or run <b>EXPORTTOAUTOCAD</b> first.</div>`);
-    // Missing external references.
+      msgs.push(surveyResultHTML(entry, r, how));
+    }
+    const noZ = parsed.filter((p) => p.xyz.length < 9 && p.cad).map((p) => p.name);
+    if (role !== 'linework' && noZ.length)
+      msgs.push(`<div class="info">${noZ.join(', ')} ha${noZ.length > 1 ? 've' : 's'} no elevations (no 3D lines, points or spot-elevation text). ${survey ? 'Your survey' : 'USGS lidar'} is used for the ground, and the drawing is shown as linework. To bring in the designed grade, add the proposed drawing (with its spot elevations) or a LandXML export of the FG surface (Civil 3D: Output → Export to LandXML).</div>`);
+    // Missing external references: name them and offer to find them in a folder.
     const have = new Set(files.map((f) => f.name.toLowerCase().replace(/\.(dwg|dxf)$/, '')));
-    const missing = parsed.flatMap((p) => p.xrefs || []).filter((x) => !have.has(x.name.toLowerCase()) && !have.has((x.path.split(/[\\/]/).pop() || '').toLowerCase().replace(/\.dwg$/, '')));
-    if (missing.length) msgs.push(`<div class="warn">This drawing pulls in ${missing.length} external reference${missing.length > 1 ? 's' : ''} that ${missing.length > 1 ? 'were' : 'was'} not included: ${missing.map((x) => `<b>${x.path.split(/[\\/]/).pop() || x.name}</b>`).join(', ')}. The site plan, topo and surfaces usually live there. Add those files too (pick them all at once), or use eTransmit / XREF → Bind in AutoCAD.</div>`);
+    const missing = parsed.flatMap((p) => p.xrefs || []).filter((x) => !have.has(x.name.toLowerCase()) && !have.has(xrefFile(x).toLowerCase().replace(/\.dwg$/, '')));
+    lastImport = { files, missing };
+    if (missing.length) msgs.push(`<div class="info">This drawing also uses ${missing.length} other drawing${missing.length > 1 ? 's' : ''} (xrefs) that ${missing.length > 1 ? 'were' : 'was'} not loaded: ${missing.map((x) => `<b>${xrefFile(x)}</b>`).join(', ')}. The topo and design surfaces usually live there.
+      <div class="row"><label class="btn primary filebtn">Find them in a folder…<input type="file" id="svXrefFolder" webkitdirectory multiple class="sr"></label></div>
+      <span class="small muted">Pick the project folder (e.g. RRO Civil); subfolders are searched. They load together with this drawing.</span></div>`);
     if (lw.length && cad) msgs.push(`Drawing linework: ${cad.count.toLocaleString()} shapes on ${Object.keys(cad.layers).length} layers${cad.dropped ? ` (${cad.dropped} legend/title shapes away from the site skipped)` : ''}.`);
     if (guess) msgs.unshift(suggestHTML(guess, code));
     else if (how) msgs.unshift(`<div>Coordinate system EPSG:${code} (${how}).</div>`);
@@ -250,6 +274,7 @@ async function importSurvey(filesOverride) {
       if (o) { setField(o.pts); msgs.push(`<div class="okline">Site outline set from ${o.from}. Drag the white corner handles on the map to adjust it; results update.</div>`); $('svResult').innerHTML = msgs.join(''); }
     }
     const sel = $('svSuggest'); if (sel) sel.onchange = () => { $('svCrs').value = 'epsg'; $('svEpsg').hidden = false; $('svEpsg').value = sel.value; importSurvey(files); };
+    const xf = $('svXrefFolder'); if (xf) xf.onchange = () => findXrefs([...xf.files]);
     if (cad?.bounds && !withZ.length) map.fitBounds(cad.bounds, { padding: [60, 60], maxZoom: 19, animate: false });
     reloadAllSurfaces();
   }, importSurvey);

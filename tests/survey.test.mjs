@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
-import { parsePoints, parseDXF, parseLandXML, parseLAS, lasHeader, unitToMeters, gridSurvey, compareSurfaces } from '../survey.js';
+import { labelElevation, parsePoints, parseDXF, parseLandXML, parseLAS, lasHeader, unitToMeters, gridSurvey, compareSurfaces } from '../survey.js';
 import { toLocal } from '../earthwork.js';
 const require = createRequire(import.meta.url);
 const proj4 = require('proj4'), Delaunator = require('delaunator').default || require('delaunator');
@@ -88,4 +88,23 @@ test('DXF 3DFACE becomes a TIN; binary DXF rejected', () => {
   const dxf = '0\nSECTION\n2\nENTITIES\n0\n3DFACE\n8\n0\n10\n0\n20\n0\n30\n1\n11\n10\n21\n0\n31\n2\n12\n10\n22\n10\n32\n3\n13\n10\n23\n10\n33\n3\n0\nENDSEC\n0\nEOF\n';
   const sv = parseDXF(dxf); assert.equal(sv.kind, 'tin'); assert.equal(sv.faces.length, 3); assert.equal(sv.xyz.length, 9);
   assert.throws(() => parseDXF('AutoCAD Binary DXF\r\n\x1a\0'), /Binary DXF/);
+});
+
+test('labelElevation: spot elevation text', () => {
+  for (const [s, z] of [['1456.25', 1456.25], ['FG 1456.25', 1456.25], ['TC=1455.8', 1455.8], ['EL. 1454.00', 1454], ['{\\fArial;FG: 1452.10}', 1452.1], ['ELEV 1450.5\'', 1450.5]])
+    assert.equal(labelElevation(s), z, s);
+  for (const s of ['SHEET 3', '12', '1:20', 'C-101', '1456', 'P-2 267 LF OF 12" C900']) assert.equal(labelElevation(s), null, s);
+});
+
+test('DXF with no 3D geometry: spot elevation text and ELEV attributes become points', () => {
+  const ent = (type, codes) => ['0', type, ...codes.flat().map(String)];
+  const L = ['0', 'SECTION', '2', 'ENTITIES'];
+  for (let k = 0; k < 6; k++) L.push(...ent('TEXT', [[8, 'C-GRAD-SPOT'], [10, 1000 + k * 10], [20, 2000], [30, 0], [1, `FG ${(1450 + k * 0.1).toFixed(2)}`]]));
+  for (let k = 0; k < 4; k++) L.push(...ent('ATTRIB', [[8, 'V-NODE'], [10, 1000 + k * 10], [20, 2050], [30, 0], [2, 'ELEV'], [1, `${(1449 + k * 0.2).toFixed(2)}`]]));
+  L.push(...ent('TEXT', [[8, 'C-ANNO'], [10, 0], [20, 0], [30, 0], [1, '12.50']]));        // stray number far below: dropped
+  L.push(...ent('TEXT', [[8, 'C-ANNO'], [10, 5], [20, 5], [30, 0], [67, 1], [1, '1451.00']])); // paper space: ignored
+  L.push('0', 'ENDSEC', '0', 'EOF');
+  const sv = parseDXF(L.join('\n'));
+  assert.equal(sv.xyz.length / 3, 10); assert.equal(sv.fromLabels, true);
+  assert.equal(sv.xyz[2], 1450); assert.equal(sv.xyz[sv.xyz.length - 1], 1449.6);
 });
