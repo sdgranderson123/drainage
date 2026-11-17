@@ -75,7 +75,7 @@ Elevations are NAVD88, shown in feet. Estimates only — check against a survey 
 
 ## Run
 
-    npm start            # python3 -m http.server 8000, then open http://localhost:8000
+    npm start            # node tools/serve.mjs, then open http://localhost:8000 (see HANDOFF.md for PC setup)
 
 ## Checks
 
